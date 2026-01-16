@@ -81,7 +81,7 @@ echo ""
 read -p "Enter installation directory (default: ~/code): " INSTALL_DIR
 INSTALL_DIR=${INSTALL_DIR:-"$HOME/code"}
 
-read -p "Enter GitHub Repo URL (e.g., https://github.com/user/project.git): " REPO_URL
+read -p "Enter GitHub Repo URL (e.g., https://github.com/LucaSain/CameraControlSystem.git): " REPO_URL
 
 if [[ -z "$REPO_URL" ]]; then
     log_err "No Repo URL provided. Exiting."
