@@ -1,0 +1,7 @@
+flask
+numpy
+scipy
+opencv-python-headless
+adafruit-circuitpython-tmp117
+adafruit-blinka
+RPi.GPIO
