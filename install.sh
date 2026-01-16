@@ -84,7 +84,6 @@ sudo apt-get install -y \
     gstreamer1.0-alsa \
     gstreamer1.0-gl \
     gstreamer1.0-gtk3 \
-    gstreamer1.0-qt5 \
     gstreamer1.0-pulseaudio \
     python3-opencv \
     python3-scipy \
