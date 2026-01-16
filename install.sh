@@ -31,11 +31,26 @@ fi
 log_info "Updating system packages..."
 sudo apt-get update && sudo apt-get -y upgrade
 
-# 3. Install Core Dependencies
-log_info "Installing Git, Python3, Pip, and System Tools..."
-sudo apt-get install -y git python3-pip python3-venv python3-dev wget curl jq unzip
+# 3. Enable Hardware Interfaces (I2C)
+log_info "Enabling I2C Interface..."
+sudo raspi-config nonint do_i2c 0
 
-# 4. Install The Imaging Source Drivers
+# 4. Install Core Dependencies & Hardware Tools
+log_info "Installing Git, Python3, I2C tools, and System dependencies..."
+sudo apt-get install -y \
+    git \
+    python3-pip \
+    python3-venv \
+    python3-dev \
+    wget \
+    curl \
+    jq \
+    unzip \
+    i2c-tools \
+    libgpiod-dev \
+    python3-libgpiod
+
+# 5. Install The Imaging Source Drivers
 # We create a temporary directory to keep things clean
 TEMP_DIR=$(mktemp -d)
 cd "$TEMP_DIR"
@@ -55,7 +70,7 @@ log_info "Installing Drivers..."
 # Install using apt to resolve internal dependencies automatically
 sudo apt-get install -y ./tiscamera.deb ./tcamprop.deb ./gigetool.deb
 
-# 5. Install GStreamer & Python Science Stack
+# 6. Install GStreamer & Python Science Stack
 log_info "Installing GStreamer, OpenCV, and Scipy..."
 sudo apt-get install -y \
     libgstreamer1.0-0 \
@@ -76,7 +91,7 @@ sudo apt-get install -y \
     python3-gst-1.0 \
     python3-gi
 
-# 6. Clone Github Repo
+# 7. Clone Github Repo
 echo ""
 read -p "Enter installation directory (default: ~/code): " INSTALL_DIR
 INSTALL_DIR=${INSTALL_DIR:-"$HOME/code"}
@@ -109,10 +124,13 @@ fi
 
 PROJECT_ROOT=$(pwd)
 
-# 7. Create Virtual Environment (.env) & Install Requirements
+# 8. Create Virtual Environment (.env) & Install Requirements
 log_info "Setting up Python Virtual Environment in .env..."
 python3 -m venv .env
 source .env/bin/activate
+
+log_info "Installing Adafruit Blinka (I2C/GPIO support)..."
+pip3 install --upgrade adafruit-blinka
 
 if [ -f "requirements.txt" ]; then
     log_info "Installing requirements.txt..."
@@ -123,7 +141,7 @@ else
     pip install flask numpy adafruit-circuitpython-tmp117 adafruit-blinka RPi.GPIO
 fi
 
-# 8. Camera Check
+# 9. Camera Check
 log_info "Checking for connected cameras..."
 CAMERA_LIST=$(tcam-ctrl -l)
 
@@ -144,7 +162,7 @@ fi
 log_info "Camera detected!"
 echo "$CAMERA_LIST"
 
-# 9. Generate Device State JSON
+# 10. Generate Device State JSON
 log_info "Generating Camera Configuration (devicestate.json)..."
 
 # Check if generate_config.sh exists, if not, create it
@@ -188,7 +206,7 @@ fi
 # Run the generation script
 ./generate_config.sh
 
-# 10. Systemd Service Setup
+# 11. Systemd Service Setup
 echo ""
 log_info "ALL DONE!"
 read -p "Do you want to create a Systemd Service to auto-start this app? (y/N) " svc_choice
