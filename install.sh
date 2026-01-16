@@ -57,9 +57,9 @@ cd "$TEMP_DIR"
 log_info "Downloading TIS Camera Drivers..."
 
 # Define URLs
-URL1="https://dl.theimagingsource.com/7366c5ab-631a-5e7a-85f4-decf5ae86a07/"
-URL2="https://dl.theimagingsource.com/72ff2659-344d-57c8-b96b-4540afc4b629/"
-URL3="https://dl.theimagingsource.com/f32194fe-7faa-50e3-94c4-85c504dbdea6/" 
+URL1="https://dl.theimagingsource.com/7366c5ab-631a-5e7a-85f4-decf5ae86a07/tiscamera_1.1.0.4137_armhf.deb"
+URL2="https://dl.theimagingsource.com/72ff2659-344d-57c8-b96b-4540afc4b629/tiscamera-tcamprop_1.0.0.4137_armhf.deb"
+URL3="https://dl.theimagingsource.com/f32194fe-7faa-50e3-94c4-85c504dbdea6/tcam-gigetool_0.3.0_armhf.deb" 
 
 # Download
 wget -O tiscamera.deb "$URL1"
@@ -70,8 +70,9 @@ log_info "Installing Drivers..."
 # Install using apt to resolve internal dependencies automatically
 sudo apt-get install -y ./tiscamera.deb ./tcamprop.deb ./gigetool.deb
 
-# 6. Install GStreamer & Python Science Stack
-log_info "Installing GStreamer, OpenCV, and Scipy..."
+# 6. Install GStreamer, Build Tools & Python Science Stack
+# Added: libcairo2-dev, libgirepository1.0-dev, pkg-config (Required for PyGObject/gi)
+log_info "Installing GStreamer, OpenCV, Scipy and Build Tools..."
 sudo apt-get install -y \
     libgstreamer1.0-0 \
     gstreamer1.0-plugins-base \
@@ -85,6 +86,9 @@ sudo apt-get install -y \
     gstreamer1.0-gl \
     gstreamer1.0-gtk3 \
     gstreamer1.0-pulseaudio \
+    libcairo2-dev \
+    libgirepository1.0-dev \
+    pkg-config \
     python3-opencv \
     python3-scipy \
     python3-gst-1.0 \
@@ -95,12 +99,9 @@ echo ""
 read -p "Enter installation directory (default: ~/code): " INSTALL_DIR
 INSTALL_DIR=${INSTALL_DIR:-"$HOME/code"}
 
-read -p "Enter GitHub Repo URL (e.g., https://github.com/LucaSain/CameraControlSystem.git): " REPO_URL
-
-if [[ -z "$REPO_URL" ]]; then
-    log_err "No Repo URL provided. Exiting."
-    exit 1
-fi
+# Hardcoded Repo URL
+REPO_URL="https://github.com/LucaSain/CameraControlSystem.git"
+log_info "Using default Repo URL: $REPO_URL"
 
 if [ ! -d "$INSTALL_DIR" ]; then
     mkdir -p "$INSTALL_DIR"
@@ -128,8 +129,9 @@ log_info "Setting up Python Virtual Environment in .env..."
 python3 -m venv .env
 source .env/bin/activate
 
-log_info "Installing Adafruit Blinka (I2C/GPIO support)..."
-pip3 install --upgrade adafruit-blinka
+# Added: PyGObject (This fixes 'No module named gi')
+log_info "Installing Adafruit Blinka and PyGObject..."
+pip3 install --upgrade adafruit-blinka PyGObject
 
 if [ -f "requirements.txt" ]; then
     log_info "Installing requirements.txt..."
