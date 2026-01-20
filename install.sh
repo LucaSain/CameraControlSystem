@@ -55,9 +55,9 @@ TEMP_DIR=$(mktemp -d)
 cd "$TEMP_DIR"
 log_info "Downloading TIS Camera Drivers..."
 
-URL1="https://dl.theimagingsource.com/7366c5ab-631a-5e7a-85f4-decf5ae86a07"
-URL2="https://dl.theimagingsource.com/72ff2659-344d-57c8-b96b-4540afc4b629"
-URL3="https://dl.theimagingsource.com/f32194fe-7faa-50e3-94c4-85c504dbdea6" 
+URL1="https://dl.theimagingsource.com/7366c5ab-631a-5e7a-85f4-decf5ae86a07/tiscamera_1.1.0.4137_armhf.deb"
+URL2="https://dl.theimagingsource.com/72ff2659-344d-57c8-b96b-4540afc4b629/tiscamera-tcamprop_1.0.0.4137_armhf.deb"
+URL3="https://dl.theimagingsource.com/f32194fe-7faa-50e3-94c4-85c504dbdea6/tcam-gigetool_0.3.0_armhf.deb" 
 
 wget -O tiscamera.deb "$URL1"
 wget -O tcamprop.deb "$URL2"
@@ -119,11 +119,15 @@ PROJECT_ROOT=$(pwd)
 
 # 8. Create Virtual Environment (.env) & Install Requirements
 log_info "Setting up Python Virtual Environment in .env..."
+
+# IMPORTANT: --system-site-packages allows us to use the system python3-gi
+# This prevents the 'libgirepository' compilation error in pip
 python3 -m venv .env --system-site-packages
 source .env/bin/activate
 
-log_info "Installing Adafruit Blinka and PyGObject..."
-pip3 install --upgrade adafruit-blinka PyGObject
+log_info "Installing Adafruit Blinka..."
+# REMOVED: PyGObject (it will use the system version now)
+pip3 install --upgrade adafruit-blinka
 
 if [ -f "requirements.txt" ]; then
     log_info "Installing requirements.txt..."
@@ -159,7 +163,6 @@ echo "$CAMERA_LIST"
 echo ""
 log_info "Configuring Camera Settings..."
 
-# --- NEW: ASK USER FOR TRIGGER MODE ---
 read -p "Do you want to enable Hardware Trigger Mode? (y/N) " trig_choice
 if [[ "$trig_choice" == "y" || "$trig_choice" == "Y" ]]; then
     TRIGGER_VAL="On"
@@ -169,12 +172,11 @@ else
     log_info ">> Trigger Mode: DISABLED (Continuous)"
 fi
 
-# Create/Overwrite the generator script with updated logic
 log_info "Creating configuration generator script..."
 cat << 'EOF' > generate_config.sh
 #!/bin/bash
 OUTPUT_FILE="devicestate.json"
-TRIGGER_MODE=${1:-"Off"} # Accept trigger mode as argument 1
+TRIGGER_MODE=${1:-"Off"} 
 
 CAM_INFO=$(tcam-ctrl -l | head -n 1)
 SERIAL=$(echo "$CAM_INFO" | grep -oP 'Serial: \K\d+')
@@ -189,7 +191,6 @@ FPS="30/1"
 echo "Reading properties..."
 PROPERTIES=$(tcam-ctrl --save-json "$SERIAL")
 
-# We use jq to merge the specific TriggerMode setting into the properties blob
 jq -n \
   --arg serial "$SERIAL" \
   --arg pipe "tcambin name=tcam0 ! {0} ! appsink name=sink sync=false drop=true max-buffers=1" \
@@ -211,8 +212,6 @@ echo "Configuration saved to $OUTPUT_FILE"
 EOF
 
 chmod +x generate_config.sh
-
-# Run the generation script passing the user's choice
 ./generate_config.sh "$TRIGGER_VAL"
 
 
@@ -225,10 +224,13 @@ if [[ "$svc_choice" == "y" || "$svc_choice" == "Y" ]]; then
     SERVICE_NAME="laser_profiler"
     SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
     USER_NAME=$(whoami)
+    
+    # CRITICAL: Point ExecStart to the Python inside the .env virtual environment
     PYTHON_EXEC="$PROJECT_ROOT/.env/bin/python"
     MAIN_SCRIPT="$PROJECT_ROOT/main.py"
 
     log_info "Creating service file at $SERVICE_FILE..."
+    log_info "Using Interpreter: $PYTHON_EXEC"
 
     sudo bash -c "cat > $SERVICE_FILE" <<EOL
 [Unit]
