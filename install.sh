@@ -121,31 +121,34 @@ PROJECT_ROOT=$(pwd)
 
 # 8. Create Virtual Environment (.env) & Install Requirements
 log_info "Setting up Python Virtual Environment in .env..."
-# IMPORTANT: --system-site-packages allows us to use system OpenCV and GI
+
+# Create env with access to system packages (System OpenCV, System GI)
 python3 -m venv .env --system-site-packages
 source .env/bin/activate
 
 log_info "Installing Adafruit Blinka..."
 pip3 install --upgrade adafruit-blinka
 
+# --- SAFETY FIX: Clean environment of conflicts ---
+log_info "Ensuring clean environment state..."
+pip uninstall -y numpy opencv-python opencv-python-headless
+
+# --- CRITICAL FIX: Force Numpy 1.x ---
+log_info "Installing Stable NumPy (1.x)..."
+pip install "numpy<2.0.0"
+
 if [ -f "requirements.txt" ]; then
     log_info "Installing requirements.txt..."
     
-    # --- CRITICAL FIX: Remove OpenCV from requirements.txt ---
-    # We want to use the apt version (python3-opencv) we installed in Step 6.
-    # The pip version (opencv-python-headless) conflicts with numpy on Pi.
+    # Remove opencv-python from requirements file to prevent re-installing the broken pip version
     sed -i '/opencv-python/d' requirements.txt
     
     pip install --upgrade pip
-    
-    # Force stable numpy BEFORE everything else
-    pip install "numpy<2.0.0"
-    
     pip install -r requirements.txt
 else
-    log_warn "requirements.txt not found! Installing default dependencies manually..."
-    # Explicitly do NOT install opencv-python here, we rely on apt
-    pip install "numpy<2.0.0" flask adafruit-circuitpython-tmp117 adafruit-blinka RPi.GPIO
+    log_warn "requirements.txt not found! Installing dependencies manually..."
+    # Dependencies WITHOUT opencv (we use the system one)
+    pip install flask adafruit-circuitpython-tmp117 adafruit-blinka RPi.GPIO
 fi
 
 # 9. Camera Check
