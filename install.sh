@@ -31,9 +31,30 @@ fi
 log_info "Updating system packages..."
 sudo apt-get update && sudo apt-get -y upgrade
 
-# 3. Enable Hardware Interfaces (I2C)
-log_info "Enabling I2C Interface..."
+log_info "Configuring I2C Interface..."
+
+# Enable I2C via raspi-config first (ensures kernel modules are loaded)
 sudo raspi-config nonint do_i2c 0
+
+CONFIG_FILE="/boot/config.txt"
+BACKUP_FILE="/boot/config.txt.bak"
+
+# Check if baudrate is already set to prevent duplicate entries
+if grep -q "i2c_arm_baudrate" "$CONFIG_FILE"; then
+    log_warn "I2C Baudrate is already manually configured. Skipping modification."
+    grep "i2c_arm_baudrate" "$CONFIG_FILE"
+else
+    log_info "Setting I2C Baudrate to 10kHz (Safe for 2m cables)..."
+    
+    # Create backup
+    sudo cp "$CONFIG_FILE" "$BACKUP_FILE"
+    
+    # Use sed to append the baudrate parameter to the existing enable line
+    # Finds 'dtparam=i2c_arm=on' and replaces it with 'dtparam=i2c_arm=on,i2c_arm_baudrate=10000'
+    sudo sed -i 's/dtparam=i2c_arm=on/dtparam=i2c_arm=on,i2c_arm_baudrate=10000/' "$CONFIG_FILE"
+    
+    log_info "I2C Speed set to 10000. Backup saved to $BACKUP_FILE."
+fi
 
 # 4. Install Core Dependencies & Hardware Tools
 log_info "Installing Git, Python3, I2C tools, and System dependencies..."
