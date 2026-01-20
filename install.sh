@@ -57,9 +57,9 @@ TEMP_DIR=$(mktemp -d)
 cd "$TEMP_DIR"
 log_info "Downloading TIS Camera Drivers..."
 
-URL1="https://dl.theimagingsource.com/7366c5ab-631a-5e7a-85f4-decf5ae86a07/tiscamera_1.1.0.4137_armhf.deb/"
-URL2="https://dl.theimagingsource.com/72ff2659-344d-57c8-b96b-4540afc4b629/tiscamera-tcamprop_1.0.0.4137_armhf.deb/"
-URL3="https://dl.theimagingsource.com/f32194fe-7faa-50e3-94c4-85c504dbdea6/tcam-gigetool_0.3.0_armhf.deb/" 
+URL1="https://dl.theimagingsource.com/7366c5ab-631a-5e7a-85f4-decf5ae86a07/"
+URL2="https://dl.theimagingsource.com/72ff2659-344d-57c8-b96b-4540afc4b629/"
+URL3="https://dl.theimagingsource.com/f32194fe-7faa-50e3-94c4-85c504dbdea6/" 
 
 wget -O tiscamera.deb "$URL1"
 wget -O tcamprop.deb "$URL2"
@@ -121,6 +121,7 @@ PROJECT_ROOT=$(pwd)
 
 # 8. Create Virtual Environment (.env) & Install Requirements
 log_info "Setting up Python Virtual Environment in .env..."
+# IMPORTANT: --system-site-packages allows us to use system OpenCV and GI
 python3 -m venv .env --system-site-packages
 source .env/bin/activate
 
@@ -129,13 +130,21 @@ pip3 install --upgrade adafruit-blinka
 
 if [ -f "requirements.txt" ]; then
     log_info "Installing requirements.txt..."
+    
+    # --- CRITICAL FIX: Remove OpenCV from requirements.txt ---
+    # We want to use the apt version (python3-opencv) we installed in Step 6.
+    # The pip version (opencv-python-headless) conflicts with numpy on Pi.
+    sed -i '/opencv-python/d' requirements.txt
+    
     pip install --upgrade pip
-    # FIX: Force install stable numpy 1.x BEFORE other requirements
+    
+    # Force stable numpy BEFORE everything else
     pip install "numpy<2.0.0"
+    
     pip install -r requirements.txt
 else
     log_warn "requirements.txt not found! Installing default dependencies manually..."
-    # FIX: Explicitly pin numpy<2.0.0 here as well
+    # Explicitly do NOT install opencv-python here, we rely on apt
     pip install "numpy<2.0.0" flask adafruit-circuitpython-tmp117 adafruit-blinka RPi.GPIO
 fi
 
