@@ -1,58 +1,45 @@
 #!/bin/bash
 
 OUTPUT_FILE="devicestate.json"
+# Accept Trigger Mode as 1st argument (Default to "Off" if not provided)
+TRIGGER_MODE=${1:-"Off"} 
 
-# 1. Check if 'jq' is installed
+# --- FIXED SETTINGS (Modify these if image is still too bright/dark) ---
+EXPOSURE_TIME=250   # Microseconds (Try 100 if still white, 1000 if too dark)
+GAIN_VAL=0.0        # Keep at 0 for cleanest laser signal
+WIDTH=640
+HEIGHT=480
+FPS="30/1"
+# -----------------------------------------------------------------------
+
+# 1. Check for jq
 if ! command -v jq &> /dev/null; then
-    echo "Error: 'jq' is not installed. Please install it first:"
-    echo "sudo apt install jq"
+    echo "Error: 'jq' is not installed. sudo apt install jq"
     exit 1
 fi
 
 # 2. Find Camera
-echo "Searching for TIS cameras..."
-# Get the first camera line found
 CAM_INFO=$(tcam-ctrl -l | head -n 1)
-
 if [[ -z "$CAM_INFO" ]]; then
-    echo "Error: No camera found! Please check connection."
+    echo "Error: No camera found!"
     exit 1
 fi
 
-# Extract Serial Number using grep/regex
-# Matches "Serial: <digits>" and cuts out the digits
 SERIAL=$(echo "$CAM_INFO" | grep -oP 'Serial: \K\d+')
+echo "Found Camera: $SERIAL"
+echo "Applying Settings -> Trigger: $TRIGGER_MODE | Exposure: $EXPOSURE_TIME | Gain: $GAIN_VAL"
 
-if [[ -z "$SERIAL" ]]; then
-    echo "Error: Could not parse serial number."
-    exit 1
-fi
-
-echo "Found Camera: $CAM_INFO"
-echo "Using Serial: $SERIAL"
-
-# 3. Prompt for Stream Settings (Defaults provided)
-read -p "Enter Width (default 640): " WIDTH
-WIDTH=${WIDTH:-640}
-
-read -p "Enter Height (default 480): " HEIGHT
-HEIGHT=${HEIGHT:-480}
-
-read -p "Enter Framerate (default 30/1): " FPS
-FPS=${FPS:-"30/1"}
-
-# 4. Get Current Camera Properties
-echo "Reading current camera properties..."
+# 3. Get Base Properties
+# We read the camera's current state, but we will overwrite the important ones below
 PROPERTIES=$(tcam-ctrl --save-json "$SERIAL")
 
 if [[ -z "$PROPERTIES" ]]; then
-    echo "Error: Failed to read properties from camera."
+    echo "Error: Failed to read properties."
     exit 1
 fi
 
-# 5. Construct Final JSON
-# We use jq to construct the object structure perfectly
-# Note: serial is converted to a number | tonumber
+# 4. Construct Final JSON
+# We use jq to merge our fixed settings ON TOP of the camera properties
 echo "Generating $OUTPUT_FILE..."
 
 jq -n \
@@ -61,6 +48,9 @@ jq -n \
   --argjson w "$WIDTH" \
   --argjson h "$HEIGHT" \
   --arg fps "$FPS" \
+  --arg trig "$TRIGGER_MODE" \
+  --argjson exp "$EXPOSURE_TIME" \
+  --argjson gain "$GAIN_VAL" \
   --argjson props "$PROPERTIES" \
   '{
     pipeline: $pipe,
@@ -68,7 +58,13 @@ jq -n \
     height: $h,
     width: $w,
     framerate: $fps,
-    properties: $props
+    properties: ($props + { 
+        "TriggerMode": $trig,
+        "ExposureAuto": "Off",
+        "GainAuto": "Off",
+        "ExposureTime": $exp,
+        "Gain": $gain
+    })
   }' > "$OUTPUT_FILE"
 
 echo "Done! Configuration saved to $OUTPUT_FILE"
