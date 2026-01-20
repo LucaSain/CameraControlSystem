@@ -119,7 +119,7 @@ PROJECT_ROOT=$(pwd)
 
 # 8. Create Virtual Environment (.env) & Install Requirements
 log_info "Setting up Python Virtual Environment in .env..."
-python3 -m venv .env
+python3 -m venv .env --system-site-packages
 source .env/bin/activate
 
 log_info "Installing Adafruit Blinka and PyGObject..."
