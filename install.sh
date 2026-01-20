@@ -37,6 +37,7 @@ sudo raspi-config nonint do_i2c 0
 
 # 4. Install Core Dependencies & Hardware Tools
 log_info "Installing Git, Python3, I2C tools, and System dependencies..."
+# Added: libopenblas-dev (Critical for NumPy on ARM)
 sudo apt-get install -y \
     git \
     python3-pip \
@@ -48,16 +49,17 @@ sudo apt-get install -y \
     unzip \
     i2c-tools \
     libgpiod-dev \
-    python3-libgpiod
+    python3-libgpiod \
+    libopenblas-dev
 
 # 5. Install The Imaging Source Drivers
 TEMP_DIR=$(mktemp -d)
 cd "$TEMP_DIR"
 log_info "Downloading TIS Camera Drivers..."
 
-URL1="https://dl.theimagingsource.com/7366c5ab-631a-5e7a-85f4-decf5ae86a07/tiscamera_1.1.0.4137_armhf.deb"
-URL2="https://dl.theimagingsource.com/72ff2659-344d-57c8-b96b-4540afc4b629/tiscamera-tcamprop_1.0.0.4137_armhf.deb"
-URL3="https://dl.theimagingsource.com/f32194fe-7faa-50e3-94c4-85c504dbdea6/tcam-gigetool_0.3.0_armhf.deb" 
+URL1="https://dl.theimagingsource.com/7366c5ab-631a-5e7a-85f4-decf5ae86a07/tiscamera_1.1.0.4137_armhf.deb/"
+URL2="https://dl.theimagingsource.com/72ff2659-344d-57c8-b96b-4540afc4b629/tiscamera-tcamprop_1.0.0.4137_armhf.deb/"
+URL3="https://dl.theimagingsource.com/f32194fe-7faa-50e3-94c4-85c504dbdea6/tcam-gigetool_0.3.0_armhf.deb/" 
 
 wget -O tiscamera.deb "$URL1"
 wget -O tcamprop.deb "$URL2"
@@ -119,23 +121,22 @@ PROJECT_ROOT=$(pwd)
 
 # 8. Create Virtual Environment (.env) & Install Requirements
 log_info "Setting up Python Virtual Environment in .env..."
-
-# IMPORTANT: --system-site-packages allows us to use the system python3-gi
-# This prevents the 'libgirepository' compilation error in pip
 python3 -m venv .env --system-site-packages
 source .env/bin/activate
 
 log_info "Installing Adafruit Blinka..."
-# REMOVED: PyGObject (it will use the system version now)
 pip3 install --upgrade adafruit-blinka
 
 if [ -f "requirements.txt" ]; then
     log_info "Installing requirements.txt..."
     pip install --upgrade pip
+    # FIX: Force install stable numpy 1.x BEFORE other requirements
+    pip install "numpy<2.0.0"
     pip install -r requirements.txt
 else
     log_warn "requirements.txt not found! Installing default dependencies manually..."
-    pip install flask numpy adafruit-circuitpython-tmp117 adafruit-blinka RPi.GPIO
+    # FIX: Explicitly pin numpy<2.0.0 here as well
+    pip install "numpy<2.0.0" flask adafruit-circuitpython-tmp117 adafruit-blinka RPi.GPIO
 fi
 
 # 9. Camera Check
@@ -224,13 +225,10 @@ if [[ "$svc_choice" == "y" || "$svc_choice" == "Y" ]]; then
     SERVICE_NAME="laser_profiler"
     SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
     USER_NAME=$(whoami)
-    
-    # CRITICAL: Point ExecStart to the Python inside the .env virtual environment
     PYTHON_EXEC="$PROJECT_ROOT/.env/bin/python"
     MAIN_SCRIPT="$PROJECT_ROOT/main.py"
 
     log_info "Creating service file at $SERVICE_FILE..."
-    log_info "Using Interpreter: $PYTHON_EXEC"
 
     sudo bash -c "cat > $SERVICE_FILE" <<EOL
 [Unit]
