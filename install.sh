@@ -51,27 +51,22 @@ sudo apt-get install -y \
     python3-libgpiod
 
 # 5. Install The Imaging Source Drivers
-# We create a temporary directory to keep things clean
 TEMP_DIR=$(mktemp -d)
 cd "$TEMP_DIR"
 log_info "Downloading TIS Camera Drivers..."
 
-# Define URLs
 URL1="https://dl.theimagingsource.com/7366c5ab-631a-5e7a-85f4-decf5ae86a07"
 URL2="https://dl.theimagingsource.com/72ff2659-344d-57c8-b96b-4540afc4b629"
 URL3="https://dl.theimagingsource.com/f32194fe-7faa-50e3-94c4-85c504dbdea6" 
 
-# Download
 wget -O tiscamera.deb "$URL1"
 wget -O tcamprop.deb "$URL2"
 wget -O gigetool.deb "$URL3"
 
 log_info "Installing Drivers..."
-# Install using apt to resolve internal dependencies automatically
 sudo apt-get install -y ./tiscamera.deb ./tcamprop.deb ./gigetool.deb
 
 # 6. Install GStreamer, Build Tools & Python Science Stack
-# Added: libcairo2-dev, libgirepository1.0-dev, pkg-config (Required for PyGObject/gi)
 log_info "Installing GStreamer, OpenCV, Scipy and Build Tools..."
 sudo apt-get install -y \
     libgstreamer1.0-0 \
@@ -99,7 +94,6 @@ echo ""
 read -p "Enter installation directory (default: ~/code): " INSTALL_DIR
 INSTALL_DIR=${INSTALL_DIR:-"$HOME/code"}
 
-# Hardcoded Repo URL
 REPO_URL="https://github.com/LucaSain/CameraControlSystem.git"
 log_info "Using default Repo URL: $REPO_URL"
 
@@ -109,7 +103,6 @@ fi
 
 cd "$INSTALL_DIR"
 
-# Extract repo name from URL to find the folder name
 REPO_NAME=$(basename "$REPO_URL" .git)
 
 if [ -d "$REPO_NAME" ]; then
@@ -129,7 +122,6 @@ log_info "Setting up Python Virtual Environment in .env..."
 python3 -m venv .env
 source .env/bin/activate
 
-# Added: PyGObject (This fixes 'No module named gi')
 log_info "Installing Adafruit Blinka and PyGObject..."
 pip3 install --upgrade adafruit-blinka PyGObject
 
@@ -164,17 +156,30 @@ log_info "Camera detected!"
 echo "$CAMERA_LIST"
 
 # 10. Generate Device State JSON
-log_info "Generating Camera Configuration (devicestate.json)..."
+echo ""
+log_info "Configuring Camera Settings..."
 
-# Check if generate_config.sh exists, if not, create it
-if [ ! -f "generate_config.sh" ]; then
-    log_warn "generate_config.sh not found in repo. Creating it now..."
-    cat << 'EOF' > generate_config.sh
+# --- NEW: ASK USER FOR TRIGGER MODE ---
+read -p "Do you want to enable Hardware Trigger Mode? (y/N) " trig_choice
+if [[ "$trig_choice" == "y" || "$trig_choice" == "Y" ]]; then
+    TRIGGER_VAL="On"
+    log_info ">> Trigger Mode: ENABLED"
+else
+    TRIGGER_VAL="Off"
+    log_info ">> Trigger Mode: DISABLED (Continuous)"
+fi
+
+# Create/Overwrite the generator script with updated logic
+log_info "Creating configuration generator script..."
+cat << 'EOF' > generate_config.sh
 #!/bin/bash
 OUTPUT_FILE="devicestate.json"
+TRIGGER_MODE=${1:-"Off"} # Accept trigger mode as argument 1
+
 CAM_INFO=$(tcam-ctrl -l | head -n 1)
 SERIAL=$(echo "$CAM_INFO" | grep -oP 'Serial: \K\d+')
 echo "Found Camera: $SERIAL"
+echo "Applying Trigger Mode: $TRIGGER_MODE"
 
 # Defaults
 WIDTH=640
@@ -184,12 +189,14 @@ FPS="30/1"
 echo "Reading properties..."
 PROPERTIES=$(tcam-ctrl --save-json "$SERIAL")
 
+# We use jq to merge the specific TriggerMode setting into the properties blob
 jq -n \
   --arg serial "$SERIAL" \
   --arg pipe "tcambin name=tcam0 ! {0} ! appsink name=sink sync=false drop=true max-buffers=1" \
   --argjson w "$WIDTH" \
   --argjson h "$HEIGHT" \
   --arg fps "$FPS" \
+  --arg trig "$TRIGGER_MODE" \
   --argjson props "$PROPERTIES" \
   '{
     pipeline: $pipe,
@@ -197,15 +204,17 @@ jq -n \
     height: $h,
     width: $w,
     framerate: $fps,
-    properties: $props
+    properties: ($props + { "TriggerMode": $trig })
   }' > "$OUTPUT_FILE"
-echo "Configuration saved."
-EOF
-    chmod +x generate_config.sh
-fi
 
-# Run the generation script
-./generate_config.sh
+echo "Configuration saved to $OUTPUT_FILE"
+EOF
+
+chmod +x generate_config.sh
+
+# Run the generation script passing the user's choice
+./generate_config.sh "$TRIGGER_VAL"
+
 
 # 11. Systemd Service Setup
 echo ""
