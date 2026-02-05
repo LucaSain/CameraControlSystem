@@ -9,7 +9,7 @@ import sys
 import threading
 import queue  # For thread-safe communication
 import csv    # For CSV writing
-from flask import Flask, Response
+from flask import Flask, Response, request, jsonify
 from scipy.optimize import curve_fit
 from adafruit_tmp117 import TMP117
 import board
@@ -208,6 +208,52 @@ def imagestream():
 @app.route('/')
 def index():
     return Response(imagegenerator(), mimetype='multipart/x-mixed-replace; boundary=imagingsource') 
+
+
+@app.route('/api/set_mode', methods=['GET', 'POST'])
+def set_mode():
+    """
+    Switch between Trigger Mode and Continuous Mode.
+    Usage:
+      GET /api/set_mode?mode=trigger
+      GET /api/set_mode?mode=continuous
+    """
+    # Get mode from query string (GET) or JSON body (POST)
+    mode = request.args.get('mode') or (request.json.get('mode') if request.is_json else None)
+
+    if not mode:
+        return jsonify({"status": "error", "message": "Missing 'mode' parameter. Use 'trigger' or 'continuous'."}), 400
+
+    mode = mode.lower()
+
+    try:
+        if mode == "trigger":
+            # Enable Hardware Trigger
+            # Based on your JSON, the property is "TriggerMode" and value is "On"
+            Tis.Set_Property("TriggerMode", "On")
+            logging.info("API Command: Switched to Trigger Mode (On)")
+            return jsonify({
+                "status": "success", 
+                "current_mode": "Trigger Mode (On)", 
+                "description": "Waiting for hardware pulse (PicoBlade)."
+            })
+
+        elif mode == "continuous":
+            # Disable Hardware Trigger (Free run)
+            Tis.Set_Property("TriggerMode", "Off")
+            logging.info("API Command: Switched to Continuous Mode (Off)")
+            return jsonify({
+                "status": "success", 
+                "current_mode": "Continuous Mode (Off)", 
+                "description": "Camera streaming freely."
+            })
+
+        else:
+            return jsonify({"status": "error", "message": f"Invalid mode '{mode}'. Use 'trigger' or 'continuous'."}), 400
+
+    except Exception as e:
+        logging.error(f"Failed to set TriggerMode: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
