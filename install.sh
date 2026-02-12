@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ==============================================================================
-#  Laser Profiler Setup Script (Debian 11 / Bullseye)
+#  Laser Profiler Setup Script (Updated for Production)
 # ==============================================================================
 
 # Helper function for colored output
@@ -31,34 +31,26 @@ fi
 log_info "Updating system packages..."
 sudo apt-get update && sudo apt-get -y upgrade
 
+# 3. I2C Configuration
 log_info "Configuring I2C Interface..."
-
 # Enable I2C via raspi-config first (ensures kernel modules are loaded)
 sudo raspi-config nonint do_i2c 0
 
 CONFIG_FILE="/boot/config.txt"
 BACKUP_FILE="/boot/config.txt.bak"
 
-# Check if baudrate is already set to prevent duplicate entries
+# Check if baudrate is already set
 if grep -q "i2c_arm_baudrate" "$CONFIG_FILE"; then
     log_warn "I2C Baudrate is already manually configured. Skipping modification."
-    grep "i2c_arm_baudrate" "$CONFIG_FILE"
 else
-    log_info "Setting I2C Baudrate to 10kHz (Safe for 2m cables)..."
-    
-    # Create backup
+    log_info "Setting I2C Baudrate to 10kHz (Safe for long cables)..."
     sudo cp "$CONFIG_FILE" "$BACKUP_FILE"
-    
-    # Use sed to append the baudrate parameter to the existing enable line
-    # Finds 'dtparam=i2c_arm=on' and replaces it with 'dtparam=i2c_arm=on,i2c_arm_baudrate=10000'
     sudo sed -i 's/dtparam=i2c_arm=on/dtparam=i2c_arm=on,i2c_arm_baudrate=10000/' "$CONFIG_FILE"
-    
-    log_info "I2C Speed set to 10000. Backup saved to $BACKUP_FILE."
+    log_info "I2C Speed set to 10000. Backup saved."
 fi
 
-# 4. Install Core Dependencies & Hardware Tools
-log_info "Installing Git, Python3, I2C tools, and System dependencies..."
-# Added: libopenblas-dev (Critical for NumPy on ARM)
+# 4. Install Dependencies
+log_info "Installing Git, Python3, I2C tools, and System libraries..."
 sudo apt-get install -y \
     git \
     python3-pip \
@@ -89,8 +81,8 @@ wget -O gigetool.deb "$URL3"
 log_info "Installing Drivers..."
 sudo apt-get install -y ./tiscamera.deb ./tcamprop.deb ./gigetool.deb
 
-# 6. Install GStreamer, Build Tools & Python Science Stack
-log_info "Installing GStreamer, OpenCV, Scipy and Build Tools..."
+# 6. Install GStreamer & Python Science Stack
+log_info "Installing GStreamer, OpenCV, Scipy..."
 sudo apt-get install -y \
     libgstreamer1.0-0 \
     gstreamer1.0-plugins-base \
@@ -99,11 +91,6 @@ sudo apt-get install -y \
     gstreamer1.0-plugins-ugly \
     gstreamer1.0-libav \
     gstreamer1.0-tools \
-    gstreamer1.0-x \
-    gstreamer1.0-alsa \
-    gstreamer1.0-gl \
-    gstreamer1.0-gtk3 \
-    gstreamer1.0-pulseaudio \
     libcairo2-dev \
     libgirepository1.0-dev \
     pkg-config \
@@ -112,20 +99,18 @@ sudo apt-get install -y \
     python3-gst-1.0 \
     python3-gi
 
-# 7. Clone Github Repo
+# 7. Clone Repository
 echo ""
 read -p "Enter installation directory (default: ~/code): " INSTALL_DIR
 INSTALL_DIR=${INSTALL_DIR:-"$HOME/code"}
 
 REPO_URL="https://github.com/LucaSain/CameraControlSystem.git"
-log_info "Using default Repo URL: $REPO_URL"
 
 if [ ! -d "$INSTALL_DIR" ]; then
     mkdir -p "$INSTALL_DIR"
 fi
 
 cd "$INSTALL_DIR"
-
 REPO_NAME=$(basename "$REPO_URL" .git)
 
 if [ -d "$REPO_NAME" ]; then
@@ -140,73 +125,54 @@ fi
 
 PROJECT_ROOT=$(pwd)
 
-# 8. Create Virtual Environment (.env) & Install Requirements
-log_info "Setting up Python Virtual Environment in .env..."
+# 8. Python Virtual Environment (.env)
+log_info "Setting up Python Virtual Environment..."
 
-# Create env with access to system packages (System OpenCV, System GI)
+# Create env accessing system packages (OpenCV, GObject)
 python3 -m venv .env --system-site-packages
 source .env/bin/activate
 
-log_info "Installing Adafruit Blinka..."
-pip3 install --upgrade adafruit-blinka
-
-# --- SAFETY FIX: Clean environment of conflicts ---
-log_info "Ensuring clean environment state..."
+log_info "Cleaning environment of conflicts..."
 pip uninstall -y numpy opencv-python opencv-python-headless
 
-# --- CRITICAL FIX: Force Numpy 1.x ---
-log_info "Installing Stable NumPy (1.x)..."
+log_info "Installing Python Libraries (Gunicorn, Flask, Hardware)..."
+# Force Numpy 1.x for compatibility
 pip install "numpy<2.0.0"
 
-if [ -f "requirements.txt" ]; then
-    log_info "Installing requirements.txt..."
-    
-    # Remove opencv-python from requirements file to prevent re-installing the broken pip version
-    sed -i '/opencv-python/d' requirements.txt
-    
-    pip install --upgrade pip
-    pip install -r requirements.txt
-else
-    log_warn "requirements.txt not found! Installing dependencies manually..."
-    # Dependencies WITHOUT opencv (we use the system one)
-    pip install flask adafruit-circuitpython-tmp117 adafruit-blinka RPi.GPIO
-fi
+# Install Production Server and App Dependencies
+pip install \
+    gunicorn \
+    flask \
+    flask-cors \
+    adafruit-circuitpython-tmp117 \
+    adafruit-blinka \
+    RPi.GPIO
 
-# 9. Camera Check
+# 9. Create Data Directory (/opt)
+log_info "Configuring Data Directory (/opt/thermal_cam)..."
+# Create the directory if it doesn't exist
+sudo mkdir -p /opt/thermal_cam
+
+# Grant ownership to the current user (usually pi) so the DB doesn't lock
+USER_NAME=$(whoami)
+sudo chown -R $USER_NAME:$USER_NAME /opt/thermal_cam
+sudo chmod -R 775 /opt/thermal_cam
+
+log_info "Permissions granted for $USER_NAME at /opt/thermal_cam"
+
+# 10. Device Configuration
 log_info "Checking for connected cameras..."
 CAMERA_LIST=$(tcam-ctrl -l)
 
 if [[ -z "$CAMERA_LIST" ]]; then
-    echo ""
     log_err "NO CAMERAS DETECTED!"
-    log_warn "The drivers were just installed. A reboot is usually required to load the kernel modules."
-    log_warn "Rebooting in 5 seconds..."
-    for i in 5 4 3 2 1; do
-        echo -n "$i... "
-        sleep 1
-    done
-    echo ""
-    sudo reboot
-    exit 0
-fi
-
-log_info "Camera detected!"
-echo "$CAMERA_LIST"
-
-# 10. Generate Device State JSON
-echo ""
-log_info "Configuring Camera Settings..."
-
-read -p "Do you want to enable Hardware Trigger Mode? (y/N) " trig_choice
-if [[ "$trig_choice" == "y" || "$trig_choice" == "Y" ]]; then
-    TRIGGER_VAL="On"
-    log_info ">> Trigger Mode: ENABLED"
+    log_warn "If drivers were just installed, a reboot is required."
+    # We don't exit here to allow setting up the service even if cam is unplugged
 else
-    TRIGGER_VAL="Off"
-    log_info ">> Trigger Mode: DISABLED (Continuous)"
+    echo "$CAMERA_LIST"
 fi
 
-log_info "Creating configuration generator script..."
+log_info "Generating Camera Config..."
 cat << 'EOF' > generate_config.sh
 #!/bin/bash
 OUTPUT_FILE="devicestate.json"
@@ -214,8 +180,6 @@ TRIGGER_MODE=${1:-"Off"}
 
 CAM_INFO=$(tcam-ctrl -l | head -n 1)
 SERIAL=$(echo "$CAM_INFO" | grep -oP 'Serial: \K\d+')
-echo "Found Camera: $SERIAL"
-echo "Applying Trigger Mode: $TRIGGER_MODE"
 
 # Defaults
 WIDTH=640
@@ -241,26 +205,21 @@ jq -n \
     framerate: $fps,
     properties: ($props + { "TriggerMode": $trig })
   }' > "$OUTPUT_FILE"
-
-echo "Configuration saved to $OUTPUT_FILE"
 EOF
-
 chmod +x generate_config.sh
-./generate_config.sh "$TRIGGER_VAL"
+./generate_config.sh "Off" # Default to Continuous
 
-
-# 11. Systemd Service Setup
+# 11. Systemd Service Setup (Production Gunicorn)
 echo ""
-log_info "ALL DONE!"
-read -p "Do you want to create a Systemd Service to auto-start this app? (y/N) " svc_choice
+read -p "Create Systemd Service? (y/N) " svc_choice
 
 if [[ "$svc_choice" == "y" || "$svc_choice" == "Y" ]]; then
     SERVICE_NAME="laser_profiler"
     SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
-    USER_NAME=$(whoami)
-    PYTHON_EXEC="$PROJECT_ROOT/.env/bin/python"
-    MAIN_SCRIPT="$PROJECT_ROOT/main.py"
-
+    
+    # Path to Gunicorn inside the venv
+    GUNICORN_EXEC="$PROJECT_ROOT/.env/bin/gunicorn"
+    
     log_info "Creating service file at $SERVICE_FILE..."
 
     sudo bash -c "cat > $SERVICE_FILE" <<EOL
@@ -272,7 +231,14 @@ After=network.target multi-user.target
 Type=simple
 User=$USER_NAME
 WorkingDirectory=$PROJECT_ROOT
-ExecStart=$PYTHON_EXEC $MAIN_SCRIPT
+
+# Production Gunicorn Command:
+# - gthread worker class: Handles threads for I/O bound tasks
+# - workers 1: Single process to hold the Camera Lock
+# - threads 10: Allows 10 concurrent connections (streams + api)
+# - bind 0.0.0.0: Listen on all interfaces
+ExecStart=$GUNICORN_EXEC --worker-class gthread --workers 1 --threads 10 --bind 0.0.0.0:5000 --timeout 60 main:app
+
 Restart=always
 RestartSec=5
 
@@ -287,10 +253,8 @@ EOL
     if [[ "$start_choice" == "y" || "$start_choice" == "Y" ]]; then
         sudo systemctl enable $SERVICE_NAME
         sudo systemctl start $SERVICE_NAME
-        log_info "Service STARTED. Check status with: systemctl status $SERVICE_NAME"
-    else
-        log_info "Service created but NOT started."
+        log_info "Service STARTED."
     fi
 fi
 
-log_info "Script Finished Successfully."
+log_info "Installation Complete!"

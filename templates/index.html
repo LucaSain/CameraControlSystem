@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en" data-bs-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Laser Profiler Dashboard</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body { background-color: #121212; color: #e0e0e0; }
+        .card { background-color: #1e1e1e; border: 1px solid #333; margin-bottom: 20px; }
+        .stat-value { font-size: 2em; font-weight: bold; color: #00d2ff; }
+        .stat-label { font-size: 0.9em; color: #aaa; }
+        .cam-feed { width: 100%; border-radius: 8px; border: 2px solid #333; }
+        .btn-mode { width: 100%; margin-bottom: 10px; }
+    </style>
+</head>
+<body>
+    <div class="container-fluid p-4">
+        <div class="row mb-3">
+            <div class="col-md-6">
+                <h2>Laser Profiler Control</h2>
+            </div>
+            <div class="col-md-6 text-end">
+                <button class="btn btn-outline-primary" onclick="setMode('trigger')">Trigger Mode</button>
+                <button class="btn btn-outline-secondary" onclick="setMode('continuous')">Continuous Mode</button>
+                <button class="btn btn-success ms-2" data-bs-toggle="modal" data-bs-target="#downloadModal">Download CSV</button>
+            </div>
+        </div>
+
+        <div class="row">
+            <div class="col-lg-6">
+                <div class="card p-2">
+                    <img src="/mjpeg_stream" class="cam-feed" alt="Live Stream">
+                </div>
+            </div>
+
+            <div class="col-lg-6">
+                <div class="row">
+                    <div class="col-6 text-center">
+                        <div class="card p-3">
+                            <div class="stat-label">Centroid X</div>
+                            <div class="stat-value" id="val-cx">--</div>
+                        </div>
+                    </div>
+                    <div class="col-6 text-center">
+                        <div class="card p-3">
+                            <div class="stat-label">Centroid Y</div>
+                            <div class="stat-value" id="val-cy">--</div>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="card p-3">
+                    <h5 class="card-title">Centroid Position (Time)</h5>
+                    <canvas id="posChart" height="150"></canvas>
+                </div>
+            
+                <div class="card p-3">
+                    <h5 class="card-title">Temperature Sensors (°C)</h5>
+                    <canvas id="tempChart" height="180"></canvas>
+                </div>
+    
+            </div>
+        </div>
+
+    </div>
+
+    <div class="modal fade" id="downloadModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog">
+            <div class="modal-content" style="background-color: #1e1e1e; color: #fff;">
+                <div class="modal-header" style="border-bottom: 1px solid #333;">
+                    <h5 class="modal-title">Download Data</h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <form id="downloadForm">
+                        <div class="mb-3">
+                            <label for="fromDate" class="form-label">From:</label>
+                            <input type="datetime-local" class="form-control" id="fromDate" required>
+                        </div>
+                        <div class="mb-3">
+                            <label for="toDate" class="form-label">To:</label>
+                            <input type="datetime-local" class="form-control" id="toDate" required>
+                        </div>
+                    </form>
+                </div>
+                <div class="modal-footer" style="border-top: 1px solid #333;">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                    <button type="button" class="btn btn-success" onclick="downloadCSV()">Download</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // --- CHARTS SETUP ---
+        const commonOptions = {
+            animation: false,
+            responsive: true,
+            scales: { x: { display: false }, y: { grid: { color: '#333' } } },
+            elements: { point: { radius: 0 } }, 
+            interaction: { mode: 'index', intersect: false }
+        };
+
+        const ctxPos = document.getElementById('posChart').getContext('2d');
+        const posChart = new Chart(ctxPos, {
+            type: 'line',
+            data: { labels: [], datasets: [ { label: 'X', borderColor: '#ff6384', data: [], borderWidth: 2 }, { label: 'Y', borderColor: '#36a2eb', data: [], borderWidth: 2 } ] },
+            options: commonOptions
+        });
+
+        const ctxTemp = document.getElementById('tempChart').getContext('2d');
+        const tempChart = new Chart(ctxTemp, {
+            type: 'line',
+            data: { labels: [], datasets: [ { label: 'T1', borderColor: '#ff9f40', data: [] }, { label: 'T2', borderColor: '#ffcd56', data: [] }, { label: 'T3', borderColor: '#4bc0c0', data: [] }, { label: 'T4', borderColor: '#9966ff', data: [] } ] },
+            options: commonOptions
+        });
+
+        // --- DATA FETCHING ---
+        async function updateData() {
+            try {
+                const response = await fetch('/api/latest_data');
+                const data = await response.json();
+
+                if (data.timestamps && data.timestamps.length > 0) {
+                    const lastIdx = data.timestamps.length - 1;
+                    document.getElementById('val-cx').innerText = data.cx[lastIdx];
+                    document.getElementById('val-cy').innerText = data.cy[lastIdx];
+
+                    posChart.data.labels = data.timestamps;
+                    posChart.data.datasets[0].data = data.cx;
+                    posChart.data.datasets[1].data = data.cy;
+                    posChart.update();
+
+                    tempChart.data.labels = data.timestamps;
+                    tempChart.data.datasets[0].data = data.temp1;
+                    tempChart.data.datasets[1].data = data.temp2;
+                    tempChart.data.datasets[2].data = data.temp3;
+                    tempChart.data.datasets[3].data = data.temp4;
+                    tempChart.update();
+                }
+            } catch (err) { console.error("Fetch error", err); }
+        }
+
+        async function setMode(mode) {
+            try {
+                await fetch(`/api/set_mode?mode=${mode}`);
+                alert(`Switched to ${mode} mode. Reloading...`);
+                location.reload(); // Refresh the page
+            } catch (err) {
+                alert("Failed to switch mode");
+            }
+        }
+
+        // --- DOWNLOAD LOGIC ---
+        function initDownloadModal() {
+            const now = new Date();
+            // Subtract 1 hour (timezone aware)
+            const oneHourAgo = new Date(now.getTime() - (60 * 60 * 1000));
+            
+            // Format for datetime-local input (YYYY-MM-DDTHH:mm)
+            const format = (d) => {
+                const pad = (n) => n < 10 ? '0' + n : n;
+                return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+            };
+            
+            document.getElementById('toDate').value = format(now);
+            document.getElementById('fromDate').value = format(oneHourAgo);
+        }
+
+        function downloadCSV() {
+            const from = document.getElementById('fromDate').value;
+            const to = document.getElementById('toDate').value;
+            
+            if (!from || !to) {
+                alert("Please select both dates");
+                return;
+            }
+
+            // Convert local inputs to URL format
+            // We append :00 to seconds to match DB format usually
+            const fromStr = from.replace('T', ' ') + ':00';
+            const toStr = to.replace('T', ' ') + ':59'; // End of that minute
+            
+            window.location.href = `/download?from=${encodeURIComponent(fromStr)}&to=${encodeURIComponent(toStr)}`;
+            
+            // Close modal
+            const modalEl = document.getElementById('downloadModal');
+            const modal = bootstrap.Modal.getInstance(modalEl);
+            modal.hide();
+
+            setTimeout(() => {
+                location.reload();
+            }, 2000);
+        }
+
+        // Initialize modal defaults when opened
+        document.getElementById('downloadModal').addEventListener('show.bs.modal', initDownloadModal);
+
+        setInterval(updateData, 1000);
+        updateData();
+    </script>
+</body>
+</html>

@@ -7,50 +7,101 @@ import numpy as np
 import logging
 import sys
 import threading
-import queue  # For thread-safe communication
-import csv    # For CSV writing
-from flask import Flask, Response, request, jsonify
+import queue
+import sqlite3
+import board
+from flask import Flask, Response, request, jsonify, stream_with_context, render_template
 from scipy.optimize import curve_fit
 from adafruit_tmp117 import TMP117
-import board
+import io
+from flask_cors import CORS
+import os
+import signal
+
+# --- LOGGING SETUP ---
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 app = Flask(__name__)
-Tis = TIS.TIS()
+CORS(app)
 
-# --- Global Variables ---
-latest_frame = None
-cX, cY = 0, 0
+# --- Configuration ---
+DB_NAME = "/opt/thermal_cam/sensor_data.db"
+DEVICE_STATE_FILE = "devicestate.json"
 
-# --- QUEUE SETUP ---
-# Infinite size queue. Analysis thread puts data here. Writer thread takes it.
+# --- Queues & Sync ---
+processing_queue = queue.Queue(maxsize=10)  
 write_queue = queue.Queue()
+stop_event = threading.Event()
 
-# --- Camera & Sensor Setup ---
+# --- Global Variables & Locks ---
+cX, cY = None, None  
+frame_id = 0  # To track new frames
+frame_lock = threading.Lock()
+global_jpeg_bytes = None # Stores the finished frame for all clients
+IS_TRIGGER_MODE = False 
+Tis = None 
+
+# --- DATABASE HELPER ---
+def get_db_connection():
+    """Creates a robust DB connection with WAL mode and Timeout"""
+    conn = sqlite3.connect(DB_NAME, timeout=30.0)
+    conn.execute("PRAGMA journal_mode=WAL;")      
+    conn.execute("PRAGMA synchronous=NORMAL;")    
+    return conn
+
+def init_db():
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS measurements (
+                timestamp DATETIME PRIMARY KEY,
+                cx REAL,
+                cy REAL,
+                temp1 REAL,
+                temp2 REAL,
+                temp3 REAL,
+                temp4 REAL
+            )
+        ''')
+        conn.commit()
+
+init_db()
+
+# --- HARDWARE SETUP ---
+def get_startup_mode():
+    try:
+        if os.path.exists(DEVICE_STATE_FILE):
+            with open(DEVICE_STATE_FILE, 'r') as f:
+                data = json.load(f)
+                props = data.get('properties', {})
+                val = props.get('TriggerMode', props.get('Trigger Mode', 'Off'))
+                return val == 'On'
+    except Exception as e:
+        logging.error(f"Config Read Error: {e}")
+    return False
+
 try:
-    print("Loading camera device state...")
-    Tis.loadstatefile("devicestate.json")
+    Tis = TIS.TIS()
+    logging.info("Loading camera...")
+    Tis.loadstatefile(DEVICE_STATE_FILE)
     Tis.Start_pipeline()
+    IS_TRIGGER_MODE = get_startup_mode()
+    logging.info(f"Startup Mode: {'Trigger' if IS_TRIGGER_MODE else 'Continuous'}")
 except Exception as error:
-    print(error)
-    quit()
+    logging.error(f"Camera Error: {error}")
 
 i2c = board.I2C()
 try:
-    temp_sensors = [
-        TMP117(i2c, address=0x48),
-        TMP117(i2c, address=0x49),
-        TMP117(i2c, address=0x4A),
-        TMP117(i2c, address=0x4B)
-    ]
-except ValueError as e:
-    print(f"Sensor Init Error: {e}")
+    temp_sensors = [TMP117(i2c, address=0x48), TMP117(i2c, address=0x49),
+                    TMP117(i2c, address=0x4A), TMP117(i2c, address=0x4B)]
+except Exception as e:
+    logging.error(f"Sensor Init Error: {e}")
     temp_sensors = []
 
-# --- MATH: FULL 2D GAUSSIAN ---
+# --- MATH ---
 def gaussian_2d(xy, amplitude, xo, yo, sigma_x, sigma_y, theta, offset):
     x, y = xy
-    xo = float(xo)
-    yo = float(yo)
+    xo, yo = float(xo), float(yo)
     a = (np.cos(theta)**2)/(2*sigma_x**2) + (np.sin(theta)**2)/(2*sigma_y**2)
     b = -(np.sin(2*theta))/(4*sigma_x**2) + (np.sin(2*theta))/(4*sigma_y**2)
     c = (np.sin(theta)**2)/(2*sigma_x**2) + (np.cos(theta)**2)/(2*sigma_y**2)
@@ -58,203 +109,235 @@ def gaussian_2d(xy, amplitude, xo, yo, sigma_x, sigma_y, theta, offset):
     return g.ravel()
 
 def get_gaussian_center(frame):
-    # 1. Downscale for Performance (Critical for Pi 4)
-    scale_percent = 20 
-    width = int(frame.shape[1] * scale_percent / 100)
-    height = int(frame.shape[0] * scale_percent / 100)
-    dim = (width, height)
-    small_frame = cv2.resize(frame, dim, interpolation=cv2.INTER_AREA)
-
-    # 2. Background Subtraction
-    small_frame = small_frame.astype(float)
-    min_val = np.min(small_frame)
-    small_frame -= min_val
-    
-    if np.max(small_frame) == 0:
+    try:
+        scale_percent = 20  
+        width = int(frame.shape[1] * scale_percent / 100)
+        height = int(frame.shape[0] * scale_percent / 100)
+        small_frame = cv2.resize(frame, (width, height), interpolation=cv2.INTER_AREA).astype(float)
+        min_val = np.min(small_frame)
+        small_frame -= min_val
+        if np.max(small_frame) == 0: return (None, None)
+        h, w = small_frame.shape
+        x, y = np.meshgrid(np.arange(0, w), np.arange(0, h))
+        max_loc = np.unravel_index(np.argmax(small_frame), small_frame.shape)
+        initial_guess = (np.max(small_frame), max_loc[1], max_loc[0], 5, 5, 0, 0)
+        popt, _ = curve_fit(gaussian_2d, (x, y), small_frame.ravel(), p0=initial_guess)
+        return (popt[1] * (100/scale_percent), popt[2] * (100/scale_percent))
+    except:
         return (None, None)
 
-    # 3. Create Grid
-    h, w = small_frame.shape
-    x = np.arange(0, w)
-    y = np.arange(0, h)
-    x, y = np.meshgrid(x, y)
+# --- WORKER THREADS ---
+def sqlite_writer_loop():
+    """Batched DB Writer to prevent locking."""
+    conn = get_db_connection()
+    logging.info("DB Writer Started")
     
-    # 4. Initial Guess
-    max_loc = np.unravel_index(np.argmax(small_frame, axis=None), small_frame.shape)
-    guess_y, guess_x = max_loc
+    last_commit_time = time.time()
+    pending_writes = 0
     
-    initial_guess = (np.max(small_frame), guess_x, guess_y, 5, 5, 0, 0)
-    
-    try:
-        # 5. The Heavy Lifting
-        popt, pcov = curve_fit(gaussian_2d, (x, y), small_frame.ravel(), p0=initial_guess)
-        
-        # 6. Scale coordinates back to original size
-        real_x = popt[1] * (100 / scale_percent)
-        real_y = popt[2] * (100 / scale_percent)
-        return (real_x, real_y)
-        
-    except (RuntimeError, ValueError):
-        # Fallback to brightest pixel
-        return (float(guess_x * (100/scale_percent)), float(guess_y * (100/scale_percent)))
-
-# --- FILE WRITER THREAD (CONSUMER) ---
-def file_writer_loop():
-    filename = "data.csv"
-    logging.info(f"Starting file writer service for {filename}")
-    
-    with open(filename, mode='a', newline='') as f:
-        writer = csv.writer(f)
-        if f.tell() == 0:
-            writer.writerow(["Timestamp", "CenterX", "CenterY", "Temp1", "Temp2", "Temp3", "Temp4"])
-            f.flush()
-
-        while True:
+    while not stop_event.is_set():
+        try:
+            data_row = write_queue.get(timeout=1) 
+            cursor = conn.cursor()
+            cursor.execute("INSERT OR IGNORE INTO measurements VALUES (?,?,?,?,?,?,?)", data_row)
+            write_queue.task_done()
+            pending_writes += 1
+            
+            # Smart Commit (Only once per second or every 50 records)
+            current_time = time.time()
+            if pending_writes > 0 and (current_time - last_commit_time > 1.0 or pending_writes >= 50):
+                conn.commit()
+                last_commit_time = current_time
+                pending_writes = 0
+                
+        except queue.Empty:
+            if pending_writes > 0:
+                conn.commit()
+                pending_writes = 0
+            continue
+        except Exception as e:
+            logging.error(f"DB Write error: {e}")
             try:
-                data_row = write_queue.get()
-                writer.writerow(data_row)
-                f.flush()
-                write_queue.task_done()
-            except Exception as e:
-                logging.error(f"Write error: {e}")
-
-writer_thread = threading.Thread(target=file_writer_loop, daemon=True)
-writer_thread.start()
-
-# --- ANALYSIS THREAD (PRODUCER) ---
-perf_logger = logging.getLogger("perf")
-perf_logger.setLevel(logging.INFO)
-perf_logger.addHandler(logging.StreamHandler(sys.stdout))
+                conn.close()
+                time.sleep(1)
+                conn = get_db_connection()
+            except: pass
+    conn.close()
 
 def analysis_loop():
-    global cX, cY, latest_frame
-    
-    while True:
-        frame_to_process = None
-        if latest_frame is not None:
-             frame_to_process = latest_frame.copy()
-        
-        if frame_to_process is not None:
-            t0 = time.perf_counter()
-            
-            # --- 2D MATH ---
+    global cX, cY
+    while not stop_event.is_set():
+        try:
+            frame_to_process = processing_queue.get(timeout=1)
             new_cx, new_cy = get_gaussian_center(frame_to_process)
-            
-            math_time = (time.perf_counter() - t0) * 1000
             
             if new_cx is not None:
                 cX, cY = new_cx, new_cy
+                try: temps = [t.temperature for t in temp_sensors]
+                except: temps = [0, 0, 0, 0]
                 
-                # --- SENSORS ---
-                t2 = time.perf_counter()
-                try:
-                    temps = [t.temperature for t in temp_sensors]
-                except Exception:
-                    temps = [0, 0, 0, 0]
-                sensor_time = (time.perf_counter() - t2) * 1000
-                
-                # --- QUEUE PUSH ---
-                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
-                csv_data = [timestamp, f"{cX:.2f}", f"{cY:.2f}"] + [f"{t:.2f}" for t in temps]
-                write_queue.put(csv_data)
-                json
-                perf_logger.info(f"2D MATH: {math_time:.1f}ms | SENSORS: {sensor_time:.1f}ms | QUEUE: {write_queue.qsize()}")
+                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                write_queue.put((timestamp, round(cX, 2), round(cY, 2), *[round(t, 2) for t in temps]))
+            
+            processing_queue.task_done()
+        except queue.Empty: continue
+        except Exception: pass
 
-        time.sleep(0.05) 
-
-analysis_thread = threading.Thread(target=analysis_loop, daemon=True)
-analysis_thread.start()
-
-# --- FAST CALLBACK ---
+# --- CALLBACK (HEAVY LIFTING HERE) ---
 class CustomData:
-    def __init__(self):
-        self.busy = False
+    def __init__(self): self.busy = False
 CD = CustomData()
 
 def on_new_image(tis, userdata):
-    global latest_frame
-    if userdata.busy: return
-    userdata.busy = True
-    frame = tis.Get_image()
-    if frame is not None:
-        latest_frame = frame
-    userdata.busy = False
+    global global_jpeg_bytes, frame_id, cX, cY
+    if Tis is None: return
+    
+    raw_frame = tis.Get_image()
+    if raw_frame is None: return
+    
+    # Deep Copy
+    vis_frame = raw_frame.copy()
 
-Tis.Set_Image_Callback(on_new_image, CD)
+    # Process Once
+    heatmap = cv2.applyColorMap(vis_frame, cv2.COLORMAP_JET)
+    h, w = heatmap.shape[:2]
+    
+    # Draw overlays
+    cv2.circle(heatmap, (w//2, h//2), h//6, (255, 255, 255), 2)
+    if cX is not None and cY is not None:
+        cv2.drawMarker(heatmap, (int(cX), int(cY)), (255, 255, 255), cv2.MARKER_CROSS, 20, 2)
 
-# --- FLASK STREAM ---
+    # Encode Once
+    ret, buffer = cv2.imencode('.jpg', heatmap, [cv2.IMWRITE_JPEG_QUALITY, 60])
+    
+    if ret:
+        # Save to Global (Thread-Safe)
+        with frame_lock:
+            global_jpeg_bytes = buffer.tobytes()
+            frame_id += 1
+
+    # Trigger Logic
+    if IS_TRIGGER_MODE:
+        minVal, maxVal, minLoc, maxLoc = cv2.minMaxLoc(raw_frame)
+        if maxVal > 30:  
+            if not processing_queue.full():
+                processing_queue.put(raw_frame)
+
+if Tis:
+    Tis.Set_Image_Callback(on_new_image, CD)
+
+# --- LIGHTWEIGHT GENERATOR ---
 def imagegenerator():
-    global cX, cY
-    while True:
-        if Tis.newsample:
-            frame = Tis.Get_image()
-            Tis.newsample = False
-            if frame is not None:
-                heatmap = cv2.applyColorMap(frame, cv2.COLORMAP_JET)
-                
-                if cX and cY:
-                    cv2.drawMarker(heatmap, (int(cX), int(cY)), (255, 255, 255), cv2.MARKER_CROSS, 30, 2)
-                
-                ret, buffer = cv2.imencode('.jpg', heatmap, [cv2.IMWRITE_JPEG_QUALITY, 40])
-                if ret:
-                    yield (b'--imagingsource\r\n' b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
+    global frame_id
+    my_last_id = 0
+    
+    while not stop_event.is_set():
+        if frame_id > my_last_id:
+            with frame_lock:
+                current_bytes = global_jpeg_bytes
+                my_last_id = frame_id
+            
+            if current_bytes:
+                yield (b'--imagingsource\r\n' 
+                       b'Content-Type: image/jpeg\r\n\r\n' + current_bytes + b'\r\n')
         else:
-            time.sleep(0.001)
+            time.sleep(0.01)
 
-@app.route('/mjpeg_stream')
-def imagestream():
-    return Response(imagegenerator(), mimetype='multipart/x-mixed-replace; boundary=imagingsource')
+# --- FLASK ROUTES (Added Back) ---
 
 @app.route('/')
 def index():
-    return Response(imagegenerator(), mimetype='multipart/x-mixed-replace; boundary=imagingsource') 
+    return render_template('index.html')
 
+@app.route('/mjpeg_stream')
+def stream():
+    return Response(imagegenerator(), mimetype='multipart/x-mixed-replace; boundary=imagingsource')
 
-@app.route('/api/set_mode', methods=['GET', 'POST'])
+@app.route('/api/latest_data')
+def get_latest_data():
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT timestamp, cx, cy, temp1, temp2, temp3, temp4 FROM measurements ORDER BY timestamp DESC LIMIT 50")
+        rows = cursor.fetchall()
+        conn.close()
+
+        if not rows:
+            return jsonify({"timestamps": [], "cx": [], "cy": [], "temp1": [], "temp2": [], "temp3": [], "temp4": []})
+
+        rows = rows[::-1]
+        data = {
+            "timestamps": [r[0] for r in rows],
+            "cx": [r[1] if r[1] is not None else 0 for r in rows],
+            "cy": [r[2] if r[2] is not None else 0 for r in rows],
+            "temp1": [r[3] for r in rows],
+            "temp2": [r[4] for r in rows],
+            "temp3": [r[5] for r in rows],
+            "temp4": [r[6] for r in rows]
+        }
+        return jsonify(data)
+    except Exception as e:
+        return jsonify({"error": str(e), "timestamps": []}), 500
+
+@app.route('/api/set_mode', methods=['GET'])
 def set_mode():
-    """
-    Switch between Trigger Mode and Continuous Mode.
-    Usage:
-      GET /api/set_mode?mode=trigger
-      GET /api/set_mode?mode=continuous
-    """
-    # Get mode from query string (GET) or JSON body (POST)
-    mode = request.args.get('mode') or (request.json.get('mode') if request.is_json else None)
-
-    if not mode:
-        return jsonify({"status": "error", "message": "Missing 'mode' parameter. Use 'trigger' or 'continuous'."}), 400
-
-    mode = mode.lower()
-
+    global IS_TRIGGER_MODE, cX, cY
+    mode = request.args.get('mode', '').lower()
     try:
         if mode == "trigger":
-            # Enable Hardware Trigger
-            # Based on your JSON, the property is "TriggerMode" and value is "On"
-            Tis.Set_Property("TriggerMode", "On")
-            logging.info("API Command: Switched to Trigger Mode (On)")
-            return jsonify({
-                "status": "success", 
-                "current_mode": "Trigger Mode (On)", 
-                "description": "Waiting for hardware pulse (PicoBlade)."
-            })
-
+            if Tis: Tis.Set_Property("TriggerMode", "On")
+            IS_TRIGGER_MODE = True
         elif mode == "continuous":
-            # Disable Hardware Trigger (Free run)
-            Tis.Set_Property("TriggerMode", "Off")
-            logging.info("API Command: Switched to Continuous Mode (Off)")
-            return jsonify({
-                "status": "success", 
-                "current_mode": "Continuous Mode (Off)", 
-                "description": "Camera streaming freely."
-            })
-
-        else:
-            return jsonify({"status": "error", "message": f"Invalid mode '{mode}'. Use 'trigger' or 'continuous'."}), 400
-
+            if Tis: Tis.Set_Property("TriggerMode", "Off")
+            IS_TRIGGER_MODE = False
+            cX, cY = None, None
+            with processing_queue.mutex: processing_queue.queue.clear()
+        return jsonify({"status": "success", "mode": mode})
     except Exception as e:
-        logging.error(f"Failed to set TriggerMode: {e}")
-        return jsonify({"status": "error", "message": str(e)}), 500
+         return jsonify({"error": str(e)}), 500
+
+@app.route('/download')
+def download_data():
+    from_date = request.args.get('from')
+    to_date = request.args.get('to')
+    
+    def generate_csv():
+        yield "Timestamp,CenterX,CenterY,T1,T2,T3,T4\n"
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        if from_date and to_date:
+            cursor.execute("SELECT * FROM measurements WHERE timestamp BETWEEN ? AND ? ORDER BY timestamp DESC", (from_date, to_date))
+        else:
+            cursor.execute("SELECT * FROM measurements ORDER BY timestamp DESC LIMIT 20000")
+            
+        while True:
+            row = cursor.fetchone()
+            if row is None: break
+            yield ",".join(map(str, row)) + "\n"
+        conn.close()
+        
+    filename = f"pi_data_{datetime.now().strftime('%Y%m%d_%H%M')}.csv"
+    return Response(stream_with_context(generate_csv()), mimetype='text/csv', 
+                    headers={"Content-Disposition": f"attachment; filename={filename}"})
+
+# --- STARTUP ---
+def start_threads():
+    if not any(t.name == "SQLWriter" for t in threading.enumerate()):
+        threading.Thread(target=sqlite_writer_loop, name="SQLWriter", daemon=True).start()
+    if not any(t.name == "Analysis" for t in threading.enumerate()):
+        threading.Thread(target=analysis_loop, name="Analysis", daemon=True).start()
+
+start_threads()
+
+def signal_handler(sig, frame):
+    logging.info("Shutting down...")
+    stop_event.set()
+    if Tis: Tis.Stop_pipeline()
+    sys.exit(0)
+    
+signal.signal(signal.SIGINT, signal_handler)
+signal.signal(signal.SIGTERM, signal_handler)
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-    app.run(host='0.0.0.0', threaded=True)
+    app.run(host='0.0.0.0', port=5000, threaded=True)
