@@ -1,8 +1,11 @@
 #!/bin/bash
 
 # ==============================================================================
-#  Laser Profiler Setup Script (Updated for Production)
+#  Laser Profiler Setup Script (Automated Production Version)
 # ==============================================================================
+
+# Ensure standard PATH is available during cron re-runs
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH
 
 # Helper function for colored output
 GREEN='\033[0;32m'
@@ -14,113 +17,163 @@ log_info() { echo -e "${GREEN}[INFO]${NC} $1"; }
 log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_err() { echo -e "${RED}[ERROR]${NC} $1"; }
 
-# 1. OS Check (Debian 11 / Bullseye)
-log_info "Checking OS version..."
-if grep -q "bullseye" /etc/os-release; then
-    log_info "OS is Debian 11 (Bullseye). Proceeding..."
+# Context Variables
+STATE_FILE="$HOME/.laser_setup_state"
+SCRIPT_PATH=$(readlink -f "$0")
+INSTALL_DIR="$HOME/code"
+USER_NAME=$(whoami)
+
+# Determine current state (0 = Initial, 1 = First Reboot, 2 = Second Reboot)
+if [ -f "$STATE_FILE" ]; then
+    STATE=$(cat "$STATE_FILE")
 else
-    log_err "Detected OS is NOT Debian 11 (Bullseye)."
-    cat /etc/os-release
-    read -p "Do you want to continue anyway? (y/N) " choice
-    if [[ "$choice" != "y" ]]; then
+    STATE="0"
+fi
+
+# ==============================================================================
+# PHASE 1: Initial System Preparation & Driver Installation
+# ==============================================================================
+if [ "$STATE" == "0" ]; then
+    log_info "Starting Phase 1: Initial Setup"
+    
+    # 0. Prompt for Hostname (Only user interaction)
+    echo ""
+    read -p "Enter a local hostname for this Raspberry Pi: " NEW_HOSTNAME
+    if [ -n "$NEW_HOSTNAME" ]; then
+        log_info "Setting hostname to $NEW_HOSTNAME..."
+        sudo hostnamectl set-hostname "$NEW_HOSTNAME"
+        sudo sed -i "s/127.0.1.1.*/127.0.1.1\t$NEW_HOSTNAME/g" /etc/hosts
+    fi
+
+    # 1. OS Check (Debian 11 / Bullseye)
+    log_info "Checking OS version..."
+    if grep -q "bullseye" /etc/os-release; then
+        log_info "OS is Debian 11 (Bullseye). Proceeding..."
+    else
+        log_err "Detected OS is NOT Debian 11 (Bullseye). This script is optimized for Bullseye. Aborting."
         exit 1
+    fi
+
+    # 2. Update and Upgrade
+    log_info "Updating system packages..."
+    sudo apt-get update && sudo apt-get -y upgrade
+
+    # 3. I2C Configuration
+    log_info "Configuring I2C Interface..."
+    sudo raspi-config nonint do_i2c 0
+
+    CONFIG_FILE="/boot/config.txt"
+    BACKUP_FILE="/boot/config.txt.bak"
+
+    if grep -q "i2c_arm_baudrate" "$CONFIG_FILE"; then
+        log_warn "I2C Baudrate is already manually configured. Skipping modification."
+    else
+        log_info "Setting I2C Baudrate to 10kHz (Safe for long cables)..."
+        sudo cp "$CONFIG_FILE" "$BACKUP_FILE"
+        sudo sed -i 's/dtparam=i2c_arm=on/dtparam=i2c_arm=on,i2c_arm_baudrate=10000/' "$CONFIG_FILE"
+        log_info "I2C Speed set to 10000. Backup saved."
+    fi
+
+    # 4. Install Dependencies
+    log_info "Installing Git, Python3, I2C tools, and System libraries..."
+    sudo apt-get install -y \
+        git python3-pip python3-venv python3-dev \
+        wget curl jq unzip i2c-tools libgpiod-dev \
+        python3-libgpiod libopenblas-dev
+
+    # 5. Install The Imaging Source Drivers
+    TEMP_DIR=$(mktemp -d)
+    cd "$TEMP_DIR"
+    log_info "Downloading TIS Camera Drivers..."
+
+    URL1="https://dl.theimagingsource.com/7366c5ab-631a-5e7a-85f4-decf5ae86a07/"
+    URL2="https://dl.theimagingsource.com/72ff2659-344d-57c8-b96b-4540afc4b629/"
+    URL3="https://dl.theimagingsource.com/f32194fe-7faa-50e3-94c4-85c504dbdea6/" 
+
+    wget -O tiscamera.deb "$URL1"
+    wget -O tcamprop.deb "$URL2"
+    wget -O gigetool.deb "$URL3"
+
+    log_info "Installing Drivers..."
+    sudo apt-get install -y ./tiscamera.deb ./tcamprop.deb ./gigetool.deb
+
+    # 6. Install GStreamer & Python Science Stack
+    log_info "Installing GStreamer, OpenCV, Scipy..."
+    sudo apt-get install -y \
+        libgstreamer1.0-0 gstreamer1.0-plugins-base \
+        gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
+        gstreamer1.0-plugins-ugly gstreamer1.0-libav \
+        gstreamer1.0-tools libcairo2-dev libgirepository1.0-dev \
+        pkg-config python3-opencv python3-scipy \
+        python3-gst-1.0 python3-gi
+
+    # Setup automated resume via crontab
+    log_info "Setting up auto-resume for after reboot..."
+    (crontab -l 2>/dev/null; echo "@reboot sleep 15 && /bin/bash \"$SCRIPT_PATH\" >> \"$HOME/laser_install_resume.log\" 2>&1") | crontab -
+
+    echo "1" > "$STATE_FILE"
+    log_info "Phase 1 Complete. Rebooting in 5 seconds to load kernel modules..."
+    sleep 5
+    sudo reboot
+    exit 0
+fi
+
+# ==============================================================================
+# PHASE 2: Camera Detection Loop
+# ==============================================================================
+if [ "$STATE" == "1" ] || [ "$STATE" == "2" ]; then
+    log_info "Resuming Installation (Attempt $STATE after reboot)..."
+    log_info "Checking for connected cameras..."
+    CAMERA_LIST=$(tcam-ctrl -l)
+
+    if [[ -z "$CAMERA_LIST" ]]; then
+        if [ "$STATE" == "1" ]; then
+            log_warn "Camera NOT detected. Trying one more reboot just in case..."
+            echo "2" > "$STATE_FILE"
+            sudo reboot
+            exit 0
+        else
+            log_err "Camera still NOT detected after second reboot. Aborting auto-setup."
+            echo "$(date): ERROR: Camera not detected after multiple reboots. Please check physical USB/GigE connections and driver compatibility." > "$HOME/camera_error.log"
+            
+            # Clean up the crontab and state so it doesn't run again forever
+            crontab -l 2>/dev/null | grep -v "$SCRIPT_PATH" | crontab -
+            rm -f "$STATE_FILE"
+            exit 1
+        fi
+    else
+        log_info "Camera successfully detected!"
+        echo "$CAMERA_LIST"
+        
+        # Clean up the crontab and state file to break the loop
+        crontab -l 2>/dev/null | grep -v "$SCRIPT_PATH" | crontab -
+        rm -f "$STATE_FILE"
     fi
 fi
 
-# 2. Update and Upgrade
-log_info "Updating system packages..."
-sudo apt-get update && sudo apt-get -y upgrade
-
-# 3. I2C Configuration
-log_info "Configuring I2C Interface..."
-# Enable I2C via raspi-config first (ensures kernel modules are loaded)
-sudo raspi-config nonint do_i2c 0
-
-CONFIG_FILE="/boot/config.txt"
-BACKUP_FILE="/boot/config.txt.bak"
-
-# Check if baudrate is already set
-if grep -q "i2c_arm_baudrate" "$CONFIG_FILE"; then
-    log_warn "I2C Baudrate is already manually configured. Skipping modification."
-else
-    log_info "Setting I2C Baudrate to 10kHz (Safe for long cables)..."
-    sudo cp "$CONFIG_FILE" "$BACKUP_FILE"
-    sudo sed -i 's/dtparam=i2c_arm=on/dtparam=i2c_arm=on,i2c_arm_baudrate=10000/' "$CONFIG_FILE"
-    log_info "I2C Speed set to 10000. Backup saved."
-fi
-
-# 4. Install Dependencies
-log_info "Installing Git, Python3, I2C tools, and System libraries..."
-sudo apt-get install -y \
-    git \
-    python3-pip \
-    python3-venv \
-    python3-dev \
-    wget \
-    curl \
-    jq \
-    unzip \
-    i2c-tools \
-    libgpiod-dev \
-    python3-libgpiod \
-    libopenblas-dev
-
-# 5. Install The Imaging Source Drivers
-TEMP_DIR=$(mktemp -d)
-cd "$TEMP_DIR"
-log_info "Downloading TIS Camera Drivers..."
-
-URL1="https://dl.theimagingsource.com/7366c5ab-631a-5e7a-85f4-decf5ae86a07/"
-URL2="https://dl.theimagingsource.com/72ff2659-344d-57c8-b96b-4540afc4b629/"
-URL3="https://dl.theimagingsource.com/f32194fe-7faa-50e3-94c4-85c504dbdea6/" 
-
-wget -O tiscamera.deb "$URL1"
-wget -O tcamprop.deb "$URL2"
-wget -O gigetool.deb "$URL3"
-
-log_info "Installing Drivers..."
-sudo apt-get install -y ./tiscamera.deb ./tcamprop.deb ./gigetool.deb
-
-# 6. Install GStreamer & Python Science Stack
-log_info "Installing GStreamer, OpenCV, Scipy..."
-sudo apt-get install -y \
-    libgstreamer1.0-0 \
-    gstreamer1.0-plugins-base \
-    gstreamer1.0-plugins-good \
-    gstreamer1.0-plugins-bad \
-    gstreamer1.0-plugins-ugly \
-    gstreamer1.0-libav \
-    gstreamer1.0-tools \
-    libcairo2-dev \
-    libgirepository1.0-dev \
-    pkg-config \
-    python3-opencv \
-    python3-scipy \
-    python3-gst-1.0 \
-    python3-gi
+# ==============================================================================
+# PHASE 3: Application & Service Setup
+# ==============================================================================
+log_info "Starting Phase 3: Application Setup"
 
 # 7. Clone Repository
-echo ""
-read -p "Enter installation directory (default: ~/code): " INSTALL_DIR
-INSTALL_DIR=${INSTALL_DIR:-"$HOME/code"}
-
 REPO_URL="https://github.com/LucaSain/CameraControlSystem.git"
+REPO_NAME=$(basename "$REPO_URL" .git)
 
 if [ ! -d "$INSTALL_DIR" ]; then
     mkdir -p "$INSTALL_DIR"
 fi
 
-cd "$INSTALL_DIR"
-REPO_NAME=$(basename "$REPO_URL" .git)
+cd "$INSTALL_DIR" || exit
 
 if [ -d "$REPO_NAME" ]; then
     log_warn "Directory $REPO_NAME already exists. Pulling latest changes..."
-    cd "$REPO_NAME"
+    cd "$REPO_NAME" || exit
     git pull
 else
-    log_info "Cloning repository..."
+    log_info "Cloning repository to $INSTALL_DIR..."
     git clone "$REPO_URL"
-    cd "$REPO_NAME"
+    cd "$REPO_NAME" || exit
 fi
 
 PROJECT_ROOT=$(pwd)
@@ -136,43 +189,17 @@ log_info "Cleaning environment of conflicts..."
 pip uninstall -y numpy opencv-python opencv-python-headless
 
 log_info "Installing Python Libraries (Gunicorn, Flask, Hardware)..."
-# Force Numpy 1.x for compatibility
 pip install "numpy<2.0.0"
-
-# Install Production Server and App Dependencies
-pip install \
-    gunicorn \
-    flask \
-    flask-cors \
-    adafruit-circuitpython-tmp117 \
-    adafruit-blinka \
-    RPi.GPIO
+pip install gunicorn flask flask-cors adafruit-circuitpython-tmp117 adafruit-blinka RPi.GPIO
 
 # 9. Create Data Directory (/opt)
 log_info "Configuring Data Directory (/opt/thermal_cam)..."
-# Create the directory if it doesn't exist
 sudo mkdir -p /opt/thermal_cam
-
-# Grant ownership to the current user (usually pi) so the DB doesn't lock
-USER_NAME=$(whoami)
-sudo chown -R $USER_NAME:$USER_NAME /opt/thermal_cam
+sudo chown -R "$USER_NAME:$USER_NAME" /opt/thermal_cam
 sudo chmod -R 775 /opt/thermal_cam
 
-log_info "Permissions granted for $USER_NAME at /opt/thermal_cam"
-
 # 10. Device Configuration
-log_info "Checking for connected cameras..."
-CAMERA_LIST=$(tcam-ctrl -l)
-
-if [[ -z "$CAMERA_LIST" ]]; then
-    log_err "NO CAMERAS DETECTED!"
-    log_warn "If drivers were just installed, a reboot is required."
-    # We don't exit here to allow setting up the service even if cam is unplugged
-else
-    echo "$CAMERA_LIST"
-fi
-
-log_info "Generating Camera Config..."
+log_info "Generating Camera Config (devicestate.json)..."
 cat << 'EOF' > generate_config.sh
 #!/bin/bash
 OUTPUT_FILE="devicestate.json"
@@ -209,20 +236,14 @@ EOF
 chmod +x generate_config.sh
 ./generate_config.sh "Off" # Default to Continuous
 
-# 11. Systemd Service Setup (Production Gunicorn)
-echo ""
-read -p "Create Systemd Service? (y/N) " svc_choice
+# 11. Systemd Service Setup (Automatic)
+SERVICE_NAME="laser_profiler"
+SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
+GUNICORN_EXEC="$PROJECT_ROOT/.env/bin/gunicorn"
 
-if [[ "$svc_choice" == "y" || "$svc_choice" == "Y" ]]; then
-    SERVICE_NAME="laser_profiler"
-    SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
-    
-    # Path to Gunicorn inside the venv
-    GUNICORN_EXEC="$PROJECT_ROOT/.env/bin/gunicorn"
-    
-    log_info "Creating service file at $SERVICE_FILE..."
+log_info "Creating and enabling systemd service at $SERVICE_FILE..."
 
-    sudo bash -c "cat > $SERVICE_FILE" <<EOL
+sudo bash -c "cat > $SERVICE_FILE" <<EOL
 [Unit]
 Description=Laser Beam Profiler Service
 After=network.target multi-user.target
@@ -232,11 +253,7 @@ Type=simple
 User=$USER_NAME
 WorkingDirectory=$PROJECT_ROOT
 
-# Production Gunicorn Command:
-# - gthread worker class: Handles threads for I/O bound tasks
-# - workers 1: Single process to hold the Camera Lock
-# - threads 10: Allows 10 concurrent connections (streams + api)
-# - bind 0.0.0.0: Listen on all interfaces
+# Production Gunicorn Command
 ExecStart=$GUNICORN_EXEC --worker-class gthread --workers 1 --threads 10 --bind 0.0.0.0:5000 --timeout 60 main:app
 
 Restart=always
@@ -246,15 +263,9 @@ RestartSec=5
 WantedBy=multi-user.target
 EOL
 
-    sudo systemctl daemon-reload
-    log_info "Service created."
+sudo systemctl daemon-reload
+sudo systemctl enable $SERVICE_NAME
+sudo systemctl start $SERVICE_NAME
 
-    read -p "Enable and Start the service now? (y/N) " start_choice
-    if [[ "$start_choice" == "y" || "$start_choice" == "Y" ]]; then
-        sudo systemctl enable $SERVICE_NAME
-        sudo systemctl start $SERVICE_NAME
-        log_info "Service STARTED."
-    fi
-fi
-
-log_info "Installation Complete!"
+log_info "Service $SERVICE_NAME STARTED automatically."
+log_info "Installation and configuration are 100% COMPLETE!"
