@@ -53,8 +53,13 @@
                 </div>
                 
                 <div class="card p-3">
-                    <h5 class="card-title">Centroid Position (Time)</h5>
-                    <canvas id="posChart" height="150"></canvas>
+                    <h5 class="card-title">Centroid X (Time)</h5>
+                    <canvas id="cxChart" height="120"></canvas>
+                </div>
+
+                <div class="card p-3">
+                    <h5 class="card-title">Centroid Y (Time)</h5>
+                    <canvas id="cyChart" height="120"></canvas>
                 </div>
             
                 <div class="card p-3">
@@ -104,13 +109,23 @@
             interaction: { mode: 'index', intersect: false }
         };
 
-        const ctxPos = document.getElementById('posChart').getContext('2d');
-        const posChart = new Chart(ctxPos, {
+        // Chart for Centroid X
+        const ctxCx = document.getElementById('cxChart').getContext('2d');
+        const cxChart = new Chart(ctxCx, {
             type: 'line',
-            data: { labels: [], datasets: [ { label: 'X', borderColor: '#ff6384', data: [], borderWidth: 2 }, { label: 'Y', borderColor: '#36a2eb', data: [], borderWidth: 2 } ] },
+            data: { labels: [], datasets: [ { label: 'X', borderColor: '#ff6384', data: [], borderWidth: 2 } ] },
             options: commonOptions
         });
 
+        // Chart for Centroid Y
+        const ctxCy = document.getElementById('cyChart').getContext('2d');
+        const cyChart = new Chart(ctxCy, {
+            type: 'line',
+            data: { labels: [], datasets: [ { label: 'Y', borderColor: '#36a2eb', data: [], borderWidth: 2 } ] },
+            options: commonOptions
+        });
+
+        // Chart for Temperature
         const ctxTemp = document.getElementById('tempChart').getContext('2d');
         const tempChart = new Chart(ctxTemp, {
             type: 'line',
@@ -129,11 +144,17 @@
                     document.getElementById('val-cx').innerText = data.cx[lastIdx];
                     document.getElementById('val-cy').innerText = data.cy[lastIdx];
 
-                    posChart.data.labels = data.timestamps;
-                    posChart.data.datasets[0].data = data.cx;
-                    posChart.data.datasets[1].data = data.cy;
-                    posChart.update();
+                    // Update X Chart
+                    cxChart.data.labels = data.timestamps;
+                    cxChart.data.datasets[0].data = data.cx;
+                    cxChart.update();
 
+                    // Update Y Chart
+                    cyChart.data.labels = data.timestamps;
+                    cyChart.data.datasets[0].data = data.cy;
+                    cyChart.update();
+
+                    // Update Temp Chart
                     tempChart.data.labels = data.timestamps;
                     tempChart.data.datasets[0].data = data.temp1;
                     tempChart.data.datasets[1].data = data.temp2;
