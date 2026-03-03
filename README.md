@@ -7,7 +7,7 @@ A high-performance Python application for **The Imaging Source (TIS)** cameras o
 Set up the entire system (dependencies, drivers, repo cloning, and systemd service) with a single command:
 
 ```bash
-bash <(curl -s https://raw.githubusercontent.com/LucaSain/CameraControlSystem/refs/heads/main/install.sh)
+curl -O https://raw.githubusercontent.com/LucaSain/CameraControlSystem/refs/heads/main/install.sh && chmod +x install.sh && ./install.sh
 ```
 
 **What this script does:**
