@@ -189,6 +189,7 @@ log_info "Cleaning environment of conflicts..."
 pip uninstall -y numpy opencv-python opencv-python-headless
 
 log_info "Installing Python Libraries (Gunicorn, Flask, Hardware)..."
+python3 -m pip install --upgrade pip setuptools wheel
 pip install "numpy<2.0.0"
 pip install gunicorn flask flask-cors adafruit-circuitpython-tmp117 adafruit-blinka RPi.GPIO
 
