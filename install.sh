@@ -132,7 +132,7 @@ EOL
 
     log_info "Registering Camera with Central Pi 5 ($CENTRAL_IP)..."
     
-    # [FIX] Safer SSH injection using independent files
+        # [FIX] Safer SSH injection using independent files
     sshpass -p 'raspberry' ssh -o StrictHostKeyChecking=no pi@$CENTRAL_IP << EOF_SSH
     cd /home/pi/rathole
 
@@ -154,7 +154,7 @@ http:
           - "/$CURRENT_HOSTNAME"
   routers:
     $CURRENT_HOSTNAME-router:
-      rule: "PathPrefix(\`/$CURRENT_HOSTNAME\`)"
+      rule: 'PathPrefix("/$CURRENT_HOSTNAME")'
       service: "$CURRENT_HOSTNAME-service"
       middlewares:
         - "strip-$CURRENT_HOSTNAME"
@@ -168,6 +168,7 @@ EOL_YAML
     # Restart the Hub to apply changes
     docker compose restart rathole traefik
 EOF_SSH
+
     log_info "Central Hub successfully updated and restarted!"
 
     # 6. Install The Imaging Source Drivers
