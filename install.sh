@@ -92,6 +92,10 @@ if [ "$STATE" == "0" ]; then
     sudo chmod +x /usr/local/bin/rathole
 
     log_info "Generating Rathole Config..."
+    
+    # [FIX 1] Grab the actual system hostname to guarantee it is never blank
+    CURRENT_HOSTNAME=$(hostname)
+    
     # Generate a random hex token and a random port between 50000 and 60000
     TOKEN=$(openssl rand -hex 16)
     REMOTE_PORT=$(( 50000 + RANDOM % 10000 ))
@@ -101,7 +105,7 @@ if [ "$STATE" == "0" ]; then
 [client]
 remote_addr = "$CENTRAL_IP:2333"
 
-[client.services.$NEW_HOSTNAME]
+[client.services.$CURRENT_HOSTNAME]
 token = "$TOKEN"
 local_addr = "127.0.0.1:5000"
 EOL
@@ -127,33 +131,33 @@ EOL
     sudo systemctl enable rathole --now
 
     log_info "Registering Camera with Central Pi 5 ($CENTRAL_IP)..."
-    # Execute commands remotely on the Pi 5. 
-    # sshpass feeds the password. StrictHostKeyChecking=no bypasses the first-time "yes/no" prompt.
+    
+    # [FIX 2] Update the cd path to /home/pi/rathole
     sshpass -p 'raspberry' ssh -o StrictHostKeyChecking=no pi@$CENTRAL_IP << EOF_SSH
-    cd ~/traefik
+    cd /home/pi/rathole
 
     # Append to Rathole Server Config
     echo "" >> rathole-server.toml
-    echo "[server.services.$NEW_HOSTNAME]" >> rathole-server.toml
+    echo "[server.services.$CURRENT_HOSTNAME]" >> rathole-server.toml
     echo "token = \"$TOKEN\"" >> rathole-server.toml
     echo "bind_addr = \"0.0.0.0:$REMOTE_PORT\"" >> rathole-server.toml
 
     # Inject Traefik Routes into dynamic_conf.yml using sed
     sed -i "/middlewares:/a \\
-        strip-$NEW_HOSTNAME:\\
+        strip-$CURRENT_HOSTNAME:\\
           stripPrefix:\\
             prefixes:\\
-              - \"/$NEW_HOSTNAME\"" dynamic_conf.yml
+              - \"/$CURRENT_HOSTNAME\"" dynamic_conf.yml
 
     sed -i "/routers:/a \\
-        $NEW_HOSTNAME-router:\\
-          rule: \"PathPrefix(\\\`/$NEW_HOSTNAME\\\`)\"\\
-          service: \"$NEW_HOSTNAME-service\"\\
+        $CURRENT_HOSTNAME-router:\\
+          rule: \"PathPrefix(\\\`/$CURRENT_HOSTNAME\\\`)\"\\
+          service: \"$CURRENT_HOSTNAME-service\"\\
           middlewares:\\
-            - \"strip-$NEW_HOSTNAME\"" dynamic_conf.yml
+            - \"strip-$CURRENT_HOSTNAME\"" dynamic_conf.yml
 
     sed -i "/services:/a \\
-        $NEW_HOSTNAME-service:\\
+        $CURRENT_HOSTNAME-service:\\
           loadBalancer:\\
             servers:\\
               - url: \"http://rathole:$REMOTE_PORT\"" dynamic_conf.yml
