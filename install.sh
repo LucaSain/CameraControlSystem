@@ -165,7 +165,7 @@ http:
           - url: "http://rathole:$REMOTE_PORT"
 EOL_YAML
 
-    if ! grep -q "\"/$CURRENT_HOSTNAME\"" www/index.html; then
+	  if ! grep -q "\"/$CURRENT_HOSTNAME\"" www/index.html; then
         sed -i "//a \\        <a href=\"/$CURRENT_HOSTNAME\" class=\"card\">📷 $CURRENT_HOSTNAME</a>" www/index.html
     fi
 
