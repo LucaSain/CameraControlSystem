@@ -32,7 +32,7 @@
         <div class="row">
             <div class="col-lg-6">
                 <div class="card p-2">
-                    <img src="/mjpeg_stream" class="cam-feed" alt="Live Stream">
+                    <img src="mjpeg_stream" class="cam-feed" alt="Live Stream">
                 </div>
             </div>
 
@@ -136,7 +136,7 @@
         // --- DATA FETCHING ---
         async function updateData() {
             try {
-                const response = await fetch('/api/latest_data');
+                const response = await fetch('api/latest_data');
                 const data = await response.json();
 
                 if (data.timestamps && data.timestamps.length > 0) {
@@ -167,7 +167,7 @@
 
         async function setMode(mode) {
             try {
-                await fetch(`/api/set_mode?mode=${mode}`);
+                await fetch(`api/set_mode?mode=${mode}`);
                 alert(`Switched to ${mode} mode. Reloading...`);
                 location.reload(); // Refresh the page
             } catch (err) {
@@ -205,7 +205,7 @@
             const fromStr = from.replace('T', ' ') + ':00';
             const toStr = to.replace('T', ' ') + ':59'; // End of that minute
             
-            window.location.href = `/download?from=${encodeURIComponent(fromStr)}&to=${encodeURIComponent(toStr)}`;
+            window.location.href = `download?from=${encodeURIComponent(fromStr)}&to=${encodeURIComponent(toStr)}`;
             
             // Close modal
             const modalEl = document.getElementById('downloadModal');
