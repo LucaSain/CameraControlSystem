@@ -199,6 +199,8 @@ def encoder_thread():
 
             # 2. Overlays
             cv2.circle(heatmap, (w//2, h//2), h//6, (255, 255, 255), 2)
+				  cv2.circle(heatmap, (center_x, center_y), 4, (0, 0, 0), -1)      # Black outline
+            cv2.circle(heatmap, (center_x, center_y), 2, (255, 255, 255), -1) # White center point
             # Use local copies of cX/cY to prevent threading tearing (basic check)
             lx, ly = cX, cY
             if lx is not None and ly is not None:
