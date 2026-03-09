@@ -165,9 +165,11 @@ http:
           - url: "http://rathole:$REMOTE_PORT"
 EOL_YAML
 
-	  if ! grep -q "\"/$CURRENT_HOSTNAME\"" www/index.html; then
-        sed -i "//a \\        <a href=\"/$CURRENT_HOSTNAME\" class=\"card\">📷 $CURRENT_HOSTNAME</a>" www/index.html
-    fi
+	if ! grep -q "\"/$CURRENT_HOSTNAME\"" www/index.html; then
+    	# Match the line containing class="grid" and append (a) the HTML after it
+    	sed -i "/class=\"grid\"/a \\        <a href=\"/$CURRENT_HOSTNAME\" class=\"card\">📷 $CURRENT_HOSTNAME</a>" www/index.html
+	fi
+
 
     # Restart the Hub to apply changes
     docker compose restart rathole traefik
