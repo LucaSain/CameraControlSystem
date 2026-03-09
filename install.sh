@@ -86,7 +86,7 @@ if [ "$STATE" == "0" ]; then
 
     # 5. Rathole Tunnel Configuration & Registration
     log_info "Downloading Rathole Client..."
-    wget -qO /tmp/rathole.zip https://github.com/rapiz1/rathole/releases/download/v0.5.0/rathole-arm-unknown-linux-gnueabihf.zip
+    wget -qO /tmp/rathole.zip https://github.com/rapiz1/rathole/releases/download/v0.5.0/rathole-arm-unknown-linux-musleabihf.zip
     unzip -o /tmp/rathole.zip -d /tmp/
     sudo mv /tmp/rathole /usr/local/bin/rathole
     sudo chmod +x /usr/local/bin/rathole
