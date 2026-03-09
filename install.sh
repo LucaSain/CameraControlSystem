@@ -132,35 +132,38 @@ EOL
 
     log_info "Registering Camera with Central Pi 5 ($CENTRAL_IP)..."
     
-    # [FIX 2] Update the cd path to /home/pi/rathole
+    # [FIX] Safer SSH injection using independent files
     sshpass -p 'raspberry' ssh -o StrictHostKeyChecking=no pi@$CENTRAL_IP << EOF_SSH
     cd /home/pi/rathole
 
-    # Append to Rathole Server Config
-    echo "" >> rathole-server.toml
-    echo "[server.services.$CURRENT_HOSTNAME]" >> rathole-server.toml
-    echo "token = \"$TOKEN\"" >> rathole-server.toml
-    echo "bind_addr = \"0.0.0.0:$REMOTE_PORT\"" >> rathole-server.toml
+    # 1. Safely append to the Rathole Server Config
+    cat >> rathole-server.toml << EOL_TOML
 
-    # Inject Traefik Routes into dynamic_conf.yml using sed
-    sed -i "/middlewares:/a \\
-        strip-$CURRENT_HOSTNAME:\\
-          stripPrefix:\\
-            prefixes:\\
-              - \"/$CURRENT_HOSTNAME\"" dynamic_conf.yml
+[server.services.$CURRENT_HOSTNAME]
+token = "$TOKEN"
+bind_addr = "0.0.0.0:$REMOTE_PORT"
+EOL_TOML
 
-    sed -i "/routers:/a \\
-        $CURRENT_HOSTNAME-router:\\
-          rule: \"PathPrefix(\\\`/$CURRENT_HOSTNAME\\\`)\"\\
-          service: \"$CURRENT_HOSTNAME-service\"\\
-          middlewares:\\
-            - \"strip-$CURRENT_HOSTNAME\"" dynamic_conf.yml
-
-    sed -i "/services:/a \\
-        $CURRENT_HOSTNAME-service:\\
-          loadBalancer:\\
-            servers:\\
-              - url: \"http://rathole:$REMOTE_PORT\"" dynamic_conf.yml
+    # 2. Create an independent Traefik config file for this specific camera!
+    cat > dynamic/$CURRENT_HOSTNAME.yml << EOL_YAML
+http:
+  middlewares:
+    strip-$CURRENT_HOSTNAME:
+      stripPrefix:
+        prefixes:
+          - "/$CURRENT_HOSTNAME"
+  routers:
+    $CURRENT_HOSTNAME-router:
+      rule: "PathPrefix(\`/$CURRENT_HOSTNAME\`)"
+      service: "$CURRENT_HOSTNAME-service"
+      middlewares:
+        - "strip-$CURRENT_HOSTNAME"
+  services:
+    $CURRENT_HOSTNAME-service:
+      loadBalancer:
+        servers:
+          - url: "http://rathole:$REMOTE_PORT"
+EOL_YAML
 
     # Restart the Hub to apply changes
     docker compose restart rathole traefik
