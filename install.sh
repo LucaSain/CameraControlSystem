@@ -351,8 +351,8 @@ User=$USER_NAME
 WorkingDirectory=$PROJECT_ROOT
 
 # Apply 32-bit Architecture Paths for Tcam driver
-# Environment="GI_TYPELIB_PATH=/usr/lib/arm-linux-gnueabihf/girepository-1.0:/usr/lib/girepository-1.0"
-# Environment="GST_PLUGIN_PATH=/usr/lib/arm-linux-gnueabihf/gstreamer-1.0:/usr/lib/gstreamer-1.0"
+Environment="GI_TYPELIB_PATH=/usr/lib/arm-linux-gnueabihf/girepository-1.0:/usr/lib/girepository-1.0"
+Environment="GST_PLUGIN_PATH=/usr/lib/arm-linux-gnueabihf/gstreamer-1.0:/usr/lib/gstreamer-1.0"
 
 # Production Gunicorn Command
 ExecStart=$GUNICORN_EXEC --worker-class gthread --workers 1 --threads 10 --bind 0.0.0.0:5000 --timeout 60 main:app
