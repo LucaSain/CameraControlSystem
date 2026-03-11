@@ -15,6 +15,7 @@ from scipy.optimize import curve_fit
 from adafruit_tmp117 import TMP117
 import io
 from flask_cors import CORS
+from werkzeug.middleware.proxy_fix import ProxyFix
 import os
 import signal
 
@@ -23,6 +24,10 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 
 app = Flask(__name__)
 CORS(app)
+
+# --- PROXY FIX ---
+# Trust Traefik headers to handle relative paths properly
+app.wsgi_app = ProxyFix(app.wsgi_app, x_prefix=1)
 
 # --- Configuration ---
 DB_NAME = "/opt/thermal_cam/sensor_data.db"
@@ -198,9 +203,12 @@ def encoder_thread():
             h, w = heatmap.shape[:2]
 
             # 2. Overlays
-            cv2.circle(heatmap, (w//2, h//2), h//6, (255, 255, 255), 2)
-				  cv2.circle(heatmap, (center_x, center_y), 4, (0, 0, 0), -1)      # Black outline
+            center_x, center_y = w // 2, h // 2
+            
+            cv2.circle(heatmap, (center_x, center_y), h//6, (255, 255, 255), 2)
+            cv2.circle(heatmap, (center_x, center_y), 4, (0, 0, 0), -1)      # Black outline
             cv2.circle(heatmap, (center_x, center_y), 2, (255, 255, 255), -1) # White center point
+            
             # Use local copies of cX/cY to prevent threading tearing (basic check)
             lx, ly = cX, cY
             if lx is not None and ly is not None:
