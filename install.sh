@@ -78,6 +78,7 @@ if [ "$STATE" == "0" ]; then
 
     log_info "Installing GStreamer & Python Science Stack..."
     sudo apt-get install -y \
+        gstreamer1.0-tools \
         gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
         gstreamer1.0-plugins-bad gstreamer1.0-libav \
         python3-opencv python3-scipy python3-gst-1.0 python3-gi
@@ -115,6 +116,21 @@ pip install --upgrade pip setuptools wheel
 
 log_info "Installing Python application dependencies..."
 pip install gunicorn flask flask-cors adafruit-circuitpython-tmp117 RPi.GPIO
+
+log_info "Generating camera configuration (devicestate.json)..."
+chmod +x ./generate_config.sh
+# Run with the GStreamer plugin path exported so the TIS MIPI elements
+# (tcampimipisrc, etc.) are found during config generation.
+export GST_PLUGIN_PATH=/usr/lib/arm-linux-gnueabihf/gstreamer-1.0
+if ! ./generate_config.sh; then
+    log_err "generate_config.sh failed. Camera config was not created. Aborting."
+    exit 1
+fi
+
+if [ ! -f "devicestate.json" ]; then
+    log_err "devicestate.json was not produced by generate_config.sh. Aborting."
+    exit 1
+fi
 
 log_info "Creating Laser Profiler Service..."
 sudo bash -c "cat > /etc/systemd/system/laser_profiler.service" <<EOL
