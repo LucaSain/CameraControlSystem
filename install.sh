@@ -73,7 +73,8 @@ if [ "$STATE" == "0" ]; then
     cd "$TEMP_DIR"
     wget -O tiscamera.deb "https://dl.theimagingsource.com/7366c5ab-631a-5e7a-85f4-decf5ae86a07/"
     wget -O tcamprop.deb "https://dl.theimagingsource.com/72ff2659-344d-57c8-b96b-4540afc4b629/"
-    sudo apt-get install -y ./tiscamera.deb ./tcamprop.deb
+    wget -O tcampimipisrc.deb "https://dl.theimagingsource.com/f32194fe-7faa-50e3-94c4-85c504dbdea6/"
+    sudo apt-get install -y ./tiscamera.deb ./tcamprop.deb ./tcampimipisrc.deb
 
     log_info "Installing GStreamer & Python Science Stack..."
     sudo apt-get install -y \
