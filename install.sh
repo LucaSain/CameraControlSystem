@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ==============================================================================
-#  Laser Profiler Setup Script (Automated Production + Local Dev Version)
+#  Laser Profiler Setup Script (Local Dev Version)
 # ==============================================================================
 
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH
@@ -31,23 +31,13 @@ fi
 # ==============================================================================
 if [ "$STATE" == "0" ]; then
     log_info "Starting Phase 1: Initial Setup"
-    
+
     echo ""
     read -p "Enter a local hostname (e.g., dazzler-picam-0): " NEW_HOSTNAME
     if [ -n "$NEW_HOSTNAME" ]; then
         log_info "Setting hostname to $NEW_HOSTNAME..."
         sudo hostnamectl set-hostname "$NEW_HOSTNAME"
         sudo sed -i "s/127.0.1.1.*/127.0.1.1\t$NEW_HOSTNAME/g" /etc/hosts
-    fi
-
-    # --- THE HUB CHECK ---
-    read -p "Enter the Central Pi 5 IP [LEAVE BLANK FOR LOCAL TEST]: " CENTRAL_IP
-    if [ -z "$CENTRAL_IP" ]; then
-        log_warn "NO HUB IP PROVIDED. Entering Local-Only Mode."
-        SKIP_HUB=true
-    else
-        log_info "Hub IP set to $CENTRAL_IP. Enabling Network Mode."
-        SKIP_HUB=false
     fi
 
     log_info "Checking OS version..."
@@ -69,72 +59,14 @@ if [ "$STATE" == "0" ]; then
     sudo apt-get install -y \
         git python3-pip python3-venv python3-dev \
         wget curl jq unzip i2c-tools libgpiod-dev \
-        python3-libgpiod libopenblas-dev sshpass openssl
+        python3-libgpiod libopenblas-dev openssl
 
-    # --- NETWORK REGISTRATION (Only if CENTRAL_IP provided) ---
-    if [ "$SKIP_HUB" = false ]; then
-        log_info "Configuring Rathole Client..."
-        wget -qO /tmp/rathole.zip https://github.com/rapiz1/rathole/releases/download/v0.5.0/rathole-arm-unknown-linux-musleabihf.zip
-        unzip -o /tmp/rathole.zip -d /tmp/
-        sudo mv /tmp/rathole /usr/local/bin/rathole
-        sudo chmod +x /usr/local/bin/rathole
-
-        CURRENT_HOSTNAME=$(hostname)
-        TOKEN=$(openssl rand -hex 16)
-        REMOTE_PORT=$(( 50000 + RANDOM % 10000 ))
-
-        sudo mkdir -p /etc/rathole
-        sudo bash -c "cat > /etc/rathole/client.toml" <<EOL
-[client]
-remote_addr = "$CENTRAL_IP:2333"
-
-[client.services.$CURRENT_HOSTNAME]
-token = "$TOKEN"
-local_addr = "127.0.0.1:5000"
-EOL
-
-        log_info "Creating Rathole Service..."
-        sudo bash -c "cat > /etc/systemd/system/rathole.service" <<EOL
-[Unit]
-Description=Rathole Reverse Tunnel Client
-After=network.target
-[Service]
-Type=simple
-User=$USER_NAME
-ExecStart=/usr/local/bin/rathole --client /etc/rathole/client.toml
-Restart=always
-[Install]
-WantedBy=multi-user.target
-EOL
-        sudo systemctl daemon-reload
-        sudo systemctl enable rathole --now
-
-        log_info "Injecting Config to Hub ($CENTRAL_IP)..."
-        sshpass -p 'raspberry' ssh -o StrictHostKeyChecking=no pi@$CENTRAL_IP << EOF_SSH
-            cd /home/pi/rathole
-            echo "[server.services.$CURRENT_HOSTNAME]" >> rathole-server.toml
-            echo "token = \"$TOKEN\"" >> rathole-server.toml
-            echo "bind_addr = \"0.0.0.0:$REMOTE_PORT\"" >> rathole-server.toml
-            
-            cat > dynamic/$CURRENT_HOSTNAME.yml << EOL_YAML
-http:
-  routers:
-    $CURRENT_HOSTNAME-router:
-      rule: 'PathPrefix("/$CURRENT_HOSTNAME")'
-      service: "$CURRENT_HOSTNAME-service"
-      middlewares: ["strip-$CURRENT_HOSTNAME"]
-  middlewares:
-    strip-$CURRENT_HOSTNAME:
-      stripPrefix: { prefixes: ["/$CURRENT_HOSTNAME"] }
-  services:
-    $CURRENT_HOSTNAME-service:
-      loadBalancer: { servers: [{ url: "http://rathole:$REMOTE_PORT" }] }
-EOL_YAML
-            docker compose restart rathole traefik
-EOF_SSH
-    else
-        log_warn "Skipping Network Registration. Use http://$(hostname).local:5000 for local testing."
-    fi
+    log_info "Setting up persistent sensor database location..."
+    sudo mkdir -p /opt/thermal_cam
+    sudo touch /opt/thermal_cam/sensor_data.db
+    # Owned by the running user, readable by everyone
+    sudo chown "$USER_NAME":"$USER_NAME" /opt/thermal_cam/sensor_data.db
+    sudo chmod 644 /opt/thermal_cam/sensor_data.db
 
     log_info "Installing TIS Camera Drivers..."
     TEMP_DIR=$(mktemp -d)
@@ -172,6 +104,15 @@ cd CameraControlSystem
 
 python3 -m venv .env --system-site-packages
 source .env/bin/activate
+
+# --- Dependency fixes ---
+# The Bullseye-bundled pip ships an ancient toml parser that crashes
+# (IndexError) on modern pyproject.toml files, which then cascades into
+# resolver failures (e.g. markupsafe). Upgrade the build toolchain first.
+log_info "Upgrading pip/setuptools/wheel before installing dependencies..."
+pip install --upgrade pip setuptools wheel
+
+log_info "Installing Python application dependencies..."
 pip install gunicorn flask flask-cors adafruit-circuitpython-tmp117 RPi.GPIO
 
 log_info "Creating Laser Profiler Service..."
