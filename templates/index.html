@@ -70,6 +70,22 @@
             </div>
         </div>
 
+        <div class="row">
+            <div class="col-12">
+                <div class="card p-3">
+                    <div class="d-flex justify-content-between align-items-center mb-2">
+                        <h5 class="card-title mb-0">Camera Properties</h5>
+                        <div>
+                            <span id="propMode" class="badge bg-secondary me-2">mode: --</span>
+                            <button class="btn btn-sm btn-outline-info" onclick="loadProperties()">Refresh</button>
+                        </div>
+                    </div>
+                    <div id="propStatus" class="small text-muted mb-2"></div>
+                    <div id="propPanel" class="row g-3"></div>
+                </div>
+            </div>
+        </div>
+
     </div>
 
     <div class="modal fade" id="downloadModal" tabindex="-1" aria-hidden="true">
@@ -220,8 +236,172 @@
         // Initialize modal defaults when opened
         document.getElementById('downloadModal').addEventListener('show.bs.modal', initDownloadModal);
 
+        // --- CAMERA PROPERTY KNOBS ---
+        async function loadProperties() {
+            const panel = document.getElementById('propPanel');
+            const status = document.getElementById('propStatus');
+            status.textContent = 'Loading...';
+            try {
+                const res = await fetch('api/properties');
+                const data = await res.json();
+                if (!res.ok) {
+                    status.textContent = data.error || 'Camera not available';
+                    panel.innerHTML = '';
+                    return;
+                }
+                document.getElementById('propMode').textContent =
+                    'mode: ' + (data.trigger_mode ? 'trigger' : 'continuous');
+                renderProperties(data.properties || []);
+                status.textContent = (data.properties || []).length + ' properties';
+            } catch (err) {
+                status.textContent = 'Failed to load properties';
+                console.error(err);
+            }
+        }
+
+        function renderProperties(props) {
+            const panel = document.getElementById('propPanel');
+            panel.innerHTML = '';
+            const groups = {};
+            props.forEach(p => {
+                const cat = p.category || 'Other';
+                (groups[cat] = groups[cat] || []).push(p);
+            });
+            Object.keys(groups).sort().forEach(cat => {
+                const header = document.createElement('div');
+                header.className = 'col-12';
+                header.innerHTML =
+                    `<div class="text-info border-bottom border-secondary pb-1 mb-1"><strong>${cat}</strong></div>`;
+                panel.appendChild(header);
+                groups[cat].forEach(p => panel.appendChild(buildControl(p)));
+            });
+        }
+
+        function buildControl(p) {
+            const col = document.createElement('div');
+            col.className = 'col-md-4 col-lg-3';
+            const wrap = document.createElement('div');
+            wrap.className = 'p-2 border border-secondary rounded h-100';
+
+            const disabled = (p.available === false) || (p.locked === true) || !!p.error;
+
+            const label = document.createElement('label');
+            label.className = 'form-label small mb-1 d-block';
+            let labelText = p.display_name || p.name;
+            if (p.unit) labelText += ` (${p.unit})`;
+            label.textContent = labelText;
+            if (disabled) {
+                const badge = document.createElement('span');
+                badge.className = 'badge bg-secondary ms-1';
+                badge.textContent = p.error ? 'n/a' : (p.locked ? 'locked' : 'unavail');
+                label.appendChild(badge);
+            }
+            wrap.appendChild(label);
+
+            const type = p.type;
+            let control;
+            let hint = null;
+
+            if (type === 'enum') {
+                control = document.createElement('select');
+                control.className = 'form-select form-select-sm';
+                (p.options || []).forEach(opt => {
+                    const o = document.createElement('option');
+                    o.value = opt; o.textContent = opt;
+                    if (opt === p.value) o.selected = true;
+                    control.appendChild(o);
+                });
+                control.addEventListener('change', () => setProperty(p.name, control.value));
+            } else if (type === 'bool') {
+                const sw = document.createElement('div');
+                sw.className = 'form-check form-switch';
+                control = document.createElement('input');
+                control.className = 'form-check-input';
+                control.type = 'checkbox';
+                control.checked = !!p.value;
+                control.disabled = disabled;
+                control.addEventListener('change', () => setProperty(p.name, control.checked));
+                sw.appendChild(control);
+                wrap.appendChild(sw);
+                col.appendChild(wrap);
+                return col;
+            } else if (type === 'int' || type === 'float') {
+                control = document.createElement('input');
+                control.type = 'number';
+                control.className = 'form-control form-control-sm';
+                if (p.min !== undefined) control.min = p.min;
+                if (p.max !== undefined) control.max = p.max;
+                if (p.step !== undefined) control.step = p.step;
+                else if (type === 'float') control.step = 'any';
+                control.value = p.value;
+                const commit = () => setProperty(p.name, control.value);
+                control.addEventListener('change', commit);
+                control.addEventListener('keydown', e => { if (e.key === 'Enter') commit(); });
+                if (p.min !== undefined && p.max !== undefined) {
+                    hint = document.createElement('div');
+                    hint.className = 'small text-muted mt-1';
+                    hint.textContent = `${p.min} – ${p.max}`;
+                }
+            } else if (type === 'command') {
+                control = document.createElement('button');
+                control.className = 'btn btn-sm btn-outline-warning';
+                control.textContent = 'Execute';
+                control.addEventListener('click', () => runCommand(p.name));
+            } else {
+                control = document.createElement('input');
+                control.type = 'text';
+                control.className = 'form-control form-control-sm';
+                control.value = (p.value === null || p.value === undefined) ? '' : p.value;
+                control.addEventListener('change', () => setProperty(p.name, control.value));
+            }
+
+            control.disabled = disabled;
+            wrap.appendChild(control);
+            if (hint) wrap.appendChild(hint);
+            col.appendChild(wrap);
+            return col;
+        }
+
+        async function setProperty(name, value) {
+            const status = document.getElementById('propStatus');
+            try {
+                const res = await fetch('api/property', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name, value })
+                });
+                const data = await res.json();
+                status.textContent = (res.ok && data.status === 'success')
+                    ? `${name} = ${data.value}`
+                    : `Failed: ${name} (${data.error || 'rejected'})`;
+            } catch (err) {
+                status.textContent = `Error setting ${name}`;
+            }
+            // One change can lock/unlock others (e.g. ExposureAuto -> ExposureTime),
+            // so re-read the full set to refresh control states.
+            setTimeout(loadProperties, 250);
+        }
+
+        async function runCommand(name) {
+            const status = document.getElementById('propStatus');
+            try {
+                const res = await fetch('api/command', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name })
+                });
+                const data = await res.json();
+                status.textContent = (res.ok && data.status === 'success')
+                    ? `${name} executed`
+                    : `Failed: ${name} (${data.error || ''})`;
+            } catch (err) {
+                status.textContent = `Error running ${name}`;
+            }
+        }
+
         setInterval(updateData, 1000);
         updateData();
+        loadProperties();
     </script>
 </body>
 </html>
