@@ -188,6 +188,133 @@ class TIS:
         except GLib.Error as error:
             raise Exception(PropertyName + " : " + error.message)
 
+    def get_property_info(self, name):
+        '''
+        Return a dict describing a single property: its value, inferred control
+        type, range or enum options, and whether it is currently writable
+        (available / not locked). Every introspection call is best-effort and
+        wrapped, so version differences in the tcam API degrade gracefully
+        instead of raising.
+        '''
+        info = {"name": name}
+        try:
+            prop = self.source.get_tcam_property(name)
+        except Exception as error:
+            return {"name": name, "available": False, "locked": True,
+                    "error": str(error)}
+
+        # Human-readable metadata (best-effort).
+        for attr, key in (("get_display_name", "display_name"),
+                          ("get_category", "category"),
+                          ("get_unit", "unit")):
+            try:
+                fn = getattr(prop, attr, None)
+                if fn:
+                    val = fn()
+                    if val:
+                        info[key] = val
+            except Exception:
+                pass
+
+        # Writability state. This is what tells the UI a property cannot be set
+        # right now (e.g. ExposureTime while ExposureAuto is on, or geometry
+        # while streaming).
+        for attr, key, default in (("is_available", "available", True),
+                                   ("is_locked", "locked", False)):
+            try:
+                fn = getattr(prop, attr, None)
+                info[key] = bool(fn()) if fn else default
+            except Exception:
+                info[key] = default
+
+        # Current value (commands have none).
+        value = None
+        try:
+            value = prop.get_value()
+        except Exception:
+            value = None
+        info["value"] = value
+
+        # Enum options.
+        try:
+            fn = getattr(prop, "get_enum_entries", None)
+            if fn:
+                entries = list(fn())
+                if entries:
+                    info["type"] = "enum"
+                    info["options"] = entries
+        except Exception:
+            pass
+
+        # Numeric range (min, max[, step]).
+        if "type" not in info:
+            try:
+                fn = getattr(prop, "get_range", None)
+                if fn:
+                    rng = fn()
+                    if rng and len(rng) >= 2:
+                        info["min"] = rng[0]
+                        info["max"] = rng[1]
+                        if len(rng) >= 3 and rng[2]:
+                            info["step"] = rng[2]
+            except Exception:
+                pass
+
+        # Fall back to inferring the control type from the Python value type.
+        # bool must be checked before int (bool is a subclass of int).
+        if "type" not in info:
+            if isinstance(value, bool):
+                info["type"] = "bool"
+            elif isinstance(value, int):
+                info["type"] = "int"
+            elif isinstance(value, float):
+                info["type"] = "float"
+            elif isinstance(value, str):
+                info["type"] = "string"
+            elif value is None:
+                info["type"] = "command"
+            else:
+                info["type"] = "unknown"
+
+        return info
+
+    def list_properties_info(self):
+        '''Return get_property_info() for every property the camera exposes.'''
+        try:
+            names = self.source.get_tcam_property_names()
+        except Exception:
+            names = []
+        return [self.get_property_info(n) for n in names]
+
+    def set_property_smart(self, name, raw_value):
+        '''
+        Set a property, coercing the incoming (string) value to the type the
+        property expects. Returns the read-back value. Raises on failure so the
+        caller can report which property/value was rejected.
+        '''
+        prop = self.source.get_tcam_property(name)
+
+        current = None
+        try:
+            current = prop.get_value()
+        except Exception:
+            current = None
+
+        if isinstance(current, bool):
+            coerced = str(raw_value).strip().lower() in ("1", "true", "on", "yes")
+        elif isinstance(current, int):
+            coerced = int(float(raw_value))
+        elif isinstance(current, float):
+            coerced = float(raw_value)
+        else:
+            coerced = raw_value  # string / enum value passed through
+
+        prop.set_value(coerced)
+        try:
+            return prop.get_value()
+        except Exception:
+            return coerced
+
     def Set_Image_Callback(self, function, *data):
         self.ImageCallback = function
         self.ImageCallbackData = data
