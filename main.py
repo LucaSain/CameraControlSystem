@@ -253,24 +253,82 @@ def gaussian_2d(xy, amplitude, xo, yo, sigma_x, sigma_y, theta, offset):
     return g.ravel()
 
 
+# --- Centroid validation thresholds ---
+# Peak signal (above background, on the downscaled frame) required before we
+# trust a fit at all. Below this there is effectively no beam to locate.
+MIN_PEAK_SIGNAL = 30
+# Reject fits that land essentially on the edge of the (downscaled) frame -
+# those are almost always the optimiser latching onto noise rather than a beam.
+CENTROID_EDGE_MARGIN = 2
+
+
 def get_gaussian_center(frame):
+    """
+    Return (cx, cy) in FULL-frame pixel coordinates only when a trustworthy beam
+    centroid is found; otherwise return (None, None).
+
+    (None, None) is the 'do not record' signal: the caller skips the row
+    entirely. We reject up front (no/weak signal) and after the fit (NaN, or a
+    centre sitting on the frame edge) so that a failed/garbage fit never reaches
+    the database as a 0,0 or out-of-range value.
+    """
     try:
         scale_percent = 20
+        scale = 100.0 / scale_percent
         width = int(frame.shape[1] * scale_percent / 100)
         height = int(frame.shape[0] * scale_percent / 100)
         small_frame = cv2.resize(frame, (width, height), interpolation=cv2.INTER_AREA).astype(float)
-        min_val = np.min(small_frame)
-        small_frame -= min_val
-        if np.max(small_frame) == 0:
+
+        background = np.min(small_frame)
+        small_frame -= background
+        peak = float(np.max(small_frame))
+
+        # No beam, or signal too weak to trust -> do not record.
+        if not np.isfinite(peak) or peak < MIN_PEAK_SIGNAL:
             return (None, None)
+
         h, w = small_frame.shape
         x, y = np.meshgrid(np.arange(0, w), np.arange(0, h))
         max_loc = np.unravel_index(np.argmax(small_frame), small_frame.shape)
-        initial_guess = (np.max(small_frame), max_loc[1], max_loc[0], 5, 5, 0, 0)
-        popt, _ = curve_fit(gaussian_2d, (x, y), small_frame.ravel(), p0=initial_guess)
-        return (popt[1] * (100 / scale_percent), popt[2] * (100 / scale_percent))
+        initial_guess = (peak, max_loc[1], max_loc[0], 5, 5, 0, 0)
+
+        # Constrain the fit so the optimiser cannot converge to absurd values.
+        #         amp,     xo, yo, sx,  sy,  theta,   offset
+        lower = (0.0,     0,  0,  0.5, 0.5, -np.pi, -np.inf)
+        upper = (np.inf,  w,  h,  w,   h,    np.pi,  np.inf)
+        popt, _ = curve_fit(gaussian_2d, (x, y), small_frame.ravel(),
+                            p0=initial_guess, bounds=(lower, upper))
+
+        cx_small, cy_small = popt[1], popt[2]
+
+        # Post-fit sanity: finite, and not pinned to the frame edge.
+        if not (np.isfinite(cx_small) and np.isfinite(cy_small)):
+            return (None, None)
+        if (cx_small <= CENTROID_EDGE_MARGIN or cx_small >= w - CENTROID_EDGE_MARGIN or
+                cy_small <= CENTROID_EDGE_MARGIN or cy_small >= h - CENTROID_EDGE_MARGIN):
+            return (None, None)
+
+        return (cx_small * scale, cy_small * scale)
     except Exception:
         return (None, None)
+
+
+def is_valid_centroid(cx, cy, width, height):
+    """
+    Final gate before recording. Rejects undetected (None), non-finite, the
+    0,0 / near-origin gibberish case, and anything outside the full frame.
+    """
+    if cx is None or cy is None:
+        return False
+    if not (np.isfinite(cx) and np.isfinite(cy)):
+        return False
+    # Explicitly drop the (0,0) / near-origin garbage value.
+    if abs(cx) < 1.0 and abs(cy) < 1.0:
+        return False
+    # Must sit inside the actual frame.
+    if cx < 0 or cy < 0 or cx >= width or cy >= height:
+        return False
+    return True
 
 
 # --- WORKER: DB WRITER ---
@@ -312,13 +370,17 @@ def analysis_loop():
     while not stop_event.is_set():
         try:
             frame_to_process = processing_queue.get(timeout=1)
+            frame_h, frame_w = frame_to_process.shape[:2]
             new_cx, new_cy = get_gaussian_center(frame_to_process)
-            if new_cx is not None:
+
+            if is_valid_centroid(new_cx, new_cy, frame_w, frame_h):
                 cX, cY = new_cx, new_cy
                 temps = read_temperatures()  # always length 4; float or None
                 row_temps = [round(t, 2) if t is not None else None for t in temps]
                 timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 write_queue.put((timestamp, round(cX, 2), round(cY, 2), *row_temps))
+            # else: no beam / 0,0 / out-of-range / NaN -> skip entirely, record nothing.
+
             processing_queue.task_done()
         except queue.Empty:
             continue
