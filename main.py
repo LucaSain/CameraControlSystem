@@ -548,6 +548,65 @@ def set_mode():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route('/api/properties', methods=['GET'])
+def api_get_properties():
+    """Return all camera properties with value, type, range/options and lock state."""
+    if not (Tis and getattr(Tis, "source", None)):
+        return jsonify({"error": "camera not available", "properties": []}), 503
+    try:
+        props = Tis.list_properties_info()
+        return jsonify({"trigger_mode": IS_TRIGGER_MODE, "properties": props})
+    except Exception as e:
+        return jsonify({"error": str(e), "properties": []}), 500
+
+
+@app.route('/api/property', methods=['POST'])
+def api_set_property():
+    """Set a single property. Body: {"name": "...", "value": ...}."""
+    global IS_TRIGGER_MODE, cX, cY
+    if not (Tis and getattr(Tis, "source", None)):
+        return jsonify({"error": "camera not available"}), 503
+
+    data = request.get_json(silent=True) or {}
+    name = data.get('name')
+    value = data.get('value')
+    if not name:
+        return jsonify({"status": "error", "error": "missing 'name'"}), 400
+
+    try:
+        newval = Tis.set_property_smart(name, value)
+
+        # Keep the app's own mode state in sync if TriggerMode was changed here,
+        # otherwise the analysis gating in on_new_image would disagree with the
+        # camera. Mirror the cleanup that set_mode() does on switch to continuous.
+        if name == "TriggerMode":
+            IS_TRIGGER_MODE = (str(newval) == "On")
+            if not IS_TRIGGER_MODE:
+                cX, cY = None, None
+                with processing_queue.mutex:
+                    processing_queue.queue.clear()
+
+        return jsonify({"status": "success", "name": name, "value": newval})
+    except Exception as e:
+        return jsonify({"status": "error", "name": name, "error": str(e)}), 400
+
+
+@app.route('/api/command', methods=['POST'])
+def api_run_command():
+    """Execute a command-type property (e.g. SoftwareTrigger). Body: {"name": "..."}."""
+    if not (Tis and getattr(Tis, "source", None)):
+        return jsonify({"error": "camera not available"}), 503
+    data = request.get_json(silent=True) or {}
+    name = data.get('name')
+    if not name:
+        return jsonify({"status": "error", "error": "missing 'name'"}), 400
+    try:
+        Tis.execute_command(name)
+        return jsonify({"status": "success", "name": name})
+    except Exception as e:
+        return jsonify({"status": "error", "name": name, "error": str(e)}), 400
+
+
 @app.route('/download')
 def download_data():
     from_date = request.args.get('from')
